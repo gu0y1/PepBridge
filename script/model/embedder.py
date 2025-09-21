@@ -2,10 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
 class RelativePositionEmbedding(nn.Module):
     """
     AlphaFold2 风格的相对位置编码：
@@ -95,14 +91,14 @@ class Embedder(nn.Module):
             seq_repr = seq_repr + self.drop(attn_out)
 
         seq_repr = self.drop(self.seq_ln(seq_repr))
-        seq_repr = seq_repr * mask.unsqueeze(-1)
+        # seq_repr = seq_repr * mask.unsqueeze(-1)
 
-        pair_repr = self.pair_aa_emb_i(x).unsqueeze(1) + \
-            self.pair_aa_emb_j(x).unsqueeze(2)
+        pair_repr = self.pair_aa_emb_i(x).unsqueeze(2) + \
+            self.pair_aa_emb_j(x).unsqueeze(1)
         relpos = self.rel_pos_emb(pos_idx) 
         pair_repr = pair_repr + relpos
         pair_repr = self.drop(self.pair_ln(seq_repr))
-        pair_mask = mask.unsqueeze(1) & mask.unsqueeze(2)      # [B, L, L]
-        pair_repr = pair_repr * pair_mask.unsqueeze(-1)
+        # pair_mask = mask.unsqueeze(1) & mask.unsqueeze(2)      # [B, L, L]
+        # pair_repr = pair_repr * pair_mask.unsqueeze(-1)
 
         return seq_repr, pair_repr
