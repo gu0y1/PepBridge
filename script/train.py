@@ -411,7 +411,7 @@ def compute_losses_multi_batches(
             out["logic_imm"] = out["logic_imm"] + \
                 F.relu(mp_out["immunogenicity_prob"] - mp_out["binding_prob"]).mean() * 0.5
 
-    # -------- MPT（若提供，Phase C 才计入 λ）--------
+    # -------- MPT --------
     if "mpt" in batches:
         b = batches["mpt"]
         mhc      = b["mhc"].to(device)
