@@ -9,14 +9,14 @@ from torch.utils.data import DataLoader, Subset
 from train import train_three_phases_multi_loaders, evaluate_phase_multi
 from model.pepbridge import PepBridge
 
-def model_fn(aa_size=22, trbv_vocab_size=77):
+def model_fn(aa_vocab_size=22, trbv_vocab_size=77):
     model = PepBridge(
-        aa_size=aa_size,
+        aa_size=aa_vocab_size,
         max_len_dict={"mhc":34, "peptide":15, "cdr3":20},
         d_seq=128, d_head_seq=32,
         d_pair=64, d_head_pair=32,
         dropout=0.1,
-        n_layres_dict={"mhc":3, "peptide":6, "cdr3":6, "mp":3, "pt":3, "mpt":2},
+        n_layres_dict={"mhc":3, "peptide":6, "cdr3":6, "mp":3, "pt":3, "mpt":1},
         trbv_size=trbv_vocab_size,
     )
     return model

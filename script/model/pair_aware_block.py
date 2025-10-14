@@ -212,7 +212,7 @@ class TriangleMultiplicativeUpdate(nn.Module):
         b = mask * self.sigmoid(self.linear_b_g(z)) * self.linear_b_p(z)
 
         if(is_fp16_enabled()):
-            with torch.cuda.amp.autocast(enabled=False):
+            with torch.amp.autocast(enabled=False):
                 x = self._combine_projections(a.float(), b.float(), self._outgoing)
         else:
             x = self._combine_projections(a, b, self._outgoing)
@@ -316,10 +316,12 @@ class PairAwareBlock(nn.Module):
                                                         _outgoing=True)
         self.tri_mul_in = TriangleMultiplicativeUpdate(d_pair, d_pair, 
                                                         _outgoing=False)
+        
         self.tri_attn_start = TriangleAttention(d_pair, num_heads_pair, d_head_pair, 
                                                 starting=True, inf=1e9, gate=True)  
         self.tri_attn_end = TriangleAttention(d_pair, num_heads_pair, d_head_pair, 
                                               starting=False, inf=1e9, gate=True)
+        
         self.trans_seq = Transition(d_seq, 2, dropout)
         self.trans_pair = Transition(d_pair, 2, dropout)
 

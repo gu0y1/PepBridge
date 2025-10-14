@@ -11,7 +11,7 @@ from predicted_head import PredHead, ContactPredHead
 HeadType = Union[torch.nn.Module, Callable[..., torch.Tensor]]
 
 ## max_len{mhc:34, peptide:15, cdr3:20}
-## pair_aware_trunk n_layers 3 6 6 3 3 2
+## pair_aware_trunk n_layers 3 6 6 3 3 1
 
 class PepBridge(nn.Module):
     def __init__(self, aa_size, max_len_dict, d_seq, d_head_seq, 
