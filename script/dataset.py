@@ -1,7 +1,9 @@
 import torch
 from torch.utils.data import Dataset
 import numpy as np
+import pandas as pd
 import random
+import os
 
 from dataprocess import mk_aa_dict, mk_bv_dict, load_mhc_dict,\
     aa_to_vec, pad_1d, pad_2d, get_masked_sample, mhc_to_aa, mhc_to_esm2
@@ -42,6 +44,7 @@ class MPDataSet(Dataset):
     self.imm = immunogenicity
     self.contact = contact
     self.mask =  mask
+    self.project_root = os.path.abspath(os.path.join(os.path.dirname(__file__)))
 
     self.aa_dict = mk_aa_dict()
     self.pseudo_mhc_dict = load_mhc_dict(mhc_type, pseudo=True)
@@ -63,7 +66,7 @@ class MPDataSet(Dataset):
 
     pep_ids = aa_to_vec(pep_seq, self.aa_dict)
     if self.mask is not None and random.random() < self.mask:
-      pep_ids,_ = get_masked_sample(pep_ids, self.aa_dict, 0.10, 0)
+      pep_ids,_ = get_masked_sample(pep_ids, self.aa_dict, 0.15, 0)
     pep_ids = pad_1d(pep_ids, self.pep_max_len, pad_value=0, dtype=int)
 
     out = {
@@ -78,11 +81,27 @@ class MPDataSet(Dataset):
         out['y_imm'] = torch.tensor(float(row['immunogenicity']), dtype=torch.float32)
 
     if self.contact:
-      contact_dist = row['contact_dist']
-      contact_prob = row['contact_prob']
+      pdb_chains  = row['pdb_chains']
+      csv_path = os.path.join(self.project_root, 'data', 'mp', f'{pdb_chains}.csv')
 
-      contact_dist = np.asarray(contact_dist)
-      contact_prob = np.asarray(contact_prob)
+      contact_df = pd.read_csv(csv_path, header=0, index_col=0)
+      contact_mhc_seq = "".join(contact_df.index.astype(str))
+      contact_pep_seq = "".join(contact_df.columns.astype(str))
+
+      contact_dist = contact_df.to_numpy(dtype=float)
+
+      if not (mhc_seq == contact_mhc_seq and pep_seq == contact_pep_seq):
+          if (mhc_seq == contact_pep_seq and pep_seq == contact_mhc_seq):
+              contact_dist = contact_dist.T
+              contact_mhc_seq, contact_pep_seq = contact_pep_seq, contact_mhc_seq
+          else:
+              raise ValueError(
+                  f"Contact labels mismatch: "
+                  f"mhc_csv='{contact_mhc_seq}', pep_csv='{contact_pep_seq}', "
+                  f"mhc='{mhc_seq}', pep='{pep_seq}'"
+              )
+      
+      contact_prob = (contact_dist < 5.0).astype(np.float32)
 
       if contact_dist.ndim != 2 or contact_prob.ndim != 2:
           raise ValueError(f'contact matrix must be 2D')
@@ -104,6 +123,7 @@ class PTDataSet(Dataset):
     self.binding = binding
     self.contact = contact
     self.mask = mask
+    self.project_root = os.path.abspath(os.path.join(os.path.dirname(__file__)))
 
     self.aa_dict = mk_aa_dict()
 
@@ -117,12 +137,12 @@ class PTDataSet(Dataset):
 
     pep_ids = aa_to_vec(pep_seq, self.aa_dict)
     if self.mask is not None and random.random() < self.mask:
-      pep_ids,_ = get_masked_sample(pep_ids, self.aa_dict, 0.10, 0)
+      pep_ids,_ = get_masked_sample(pep_ids, self.aa_dict, 0.15, 0)
     pep_ids = pad_1d(pep_ids, self.pep_max_len, pad_value=0, dtype=int)
 
     cdr3_ids = aa_to_vec(cdr3_seq, self.aa_dict)
     if self.mask is not None and random.random() < self.mask:
-      cdr3_ids,_ = get_masked_sample(cdr3_ids, self.aa_dict, 0.10, 0)
+      cdr3_ids,_ = get_masked_sample(cdr3_ids, self.aa_dict, 0.15, 0)
     cdr3_ids = pad_1d(cdr3_ids, self.cdr3_max_len, pad_value=0, dtype=int)
     
     out = {
@@ -134,11 +154,27 @@ class PTDataSet(Dataset):
       out['y_pt'] = torch.tensor(float(row['binding']), dtype=torch.float32)
 
     if self.contact:
-      contact_dist = row['contact_dist']
-      contact_prob = row['contact_prob']
+      pdb_chains  = row['pdb_chains']
+      csv_path = os.path.join(self.project_root, 'data', 'pt', f'{pdb_chains}.csv')
 
-      contact_dist = np.asarray(contact_dist)
-      contact_prob = np.asarray(contact_prob)
+      contact_df = pd.read_csv(csv_path, header=0, index_col=0)
+      contact_pep_seq = "".join(contact_df.index.astype(str))
+      contact_cdr3_seq = "".join(contact_df.columns.astype(str))
+
+      contact_dist = contact_df.to_numpy(dtype=float)
+
+      if not (cdr3_seq == contact_cdr3_seq and pep_seq == contact_pep_seq):
+          if (cdr3_seq == contact_pep_seq and pep_seq == contact_cdr3_seq):
+              contact_dist = contact_dist.T
+              contact_cdr3_seq, contact_pep_seq = contact_pep_seq, contact_cdr3_seq
+          else:
+              raise ValueError(
+                  f"Contact labels mismatch: "
+                  f"cdr3_csv='{contact_cdr3_seq}', pep_csv='{contact_pep_seq}', "
+                  f"cdr3='{cdr3_seq}', pep='{pep_seq}'"
+              )
+
+      contact_prob = (contact_dist < 5.0).astype(np.float32)
 
       if contact_dist.ndim != 2 or contact_prob.ndim != 2:
         raise ValueError(f'contact matrix must be 2D')
@@ -188,12 +224,12 @@ class MPTDataSet(Dataset):
 
     pep_ids = aa_to_vec(pep_seq, self.aa_dict)
     if self.mask is not None and random.random() < self.mask:
-      pep_ids,_ = get_masked_sample(pep_ids, self.aa_dict, 0.10, 0)
+      pep_ids,_ = get_masked_sample(pep_ids, self.aa_dict, 0.15, 0)
     pep_ids = pad_1d(pep_ids, self.pep_max_len, pad_value=0, dtype=int)
 
     cdr3_ids = aa_to_vec(cdr3_seq, self.aa_dict)
     if self.mask is not None and random.random() < self.mask:
-      cdr3_ids,_ = get_masked_sample(cdr3_ids, self.aa_dict, 0.10, 0)
+      cdr3_ids,_ = get_masked_sample(cdr3_ids, self.aa_dict, 0.15, 0)
     cdr3_ids = pad_1d(cdr3_ids, self.cdr3_max_len, pad_value=0, dtype=int)
 
     out = {
