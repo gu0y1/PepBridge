@@ -6,7 +6,7 @@ import random
 import os
 
 from dataprocess import mk_aa_dict, mk_bv_dict, load_mhc_dict,\
-    aa_to_vec, pad_1d, pad_2d, get_masked_sample, mhc_to_aa, mhc_to_esm2
+    aa_to_vec, pad_1d, pad_2d, get_masked_sample, mhc_to_aa, mhc_to_esm
 
 class MaskedLMDataSet(Dataset):
   def __init__(self, seq_list, max_len, 
@@ -48,7 +48,7 @@ class MPDataSet(Dataset):
 
     self.aa_dict = mk_aa_dict()
     self.pseudo_mhc_dict = load_mhc_dict(mhc_type, pseudo=True)
-    self.esm2_mhc_dict = load_mhc_dict(mhc_type, pseudo=False)
+    self.esm_mhc_dict = load_mhc_dict(mhc_type, pseudo=False)
     
   def __len__(self):
     return len(self.df)
@@ -62,7 +62,7 @@ class MPDataSet(Dataset):
     mhc_ids = aa_to_vec(mhc_seq, self.aa_dict)                 # 1D ids
     mhc_ids = pad_1d(mhc_ids, self.mhc_max_len, pad_value=0, dtype=int)
 
-    esm2_mhc = mhc_to_esm2(mhc_name, self.esm2_mhc_dict) 
+    esm_mhc = mhc_to_esm(mhc_name, self.esm_mhc_dict) 
 
     pep_ids = aa_to_vec(pep_seq, self.aa_dict)
     if self.mask is not None and random.random() < self.mask:
@@ -72,7 +72,7 @@ class MPDataSet(Dataset):
     out = {
         'mhc': torch.as_tensor(mhc_ids, dtype=torch.long),
         'peptide': torch.as_tensor(pep_ids, dtype=torch.long),
-        'esm2_mhc': torch.as_tensor(esm2_mhc, dtype=torch.float32)
+        'esm_mhc': torch.as_tensor(esm_mhc, dtype=torch.float32)
     }
 
     if self.binding:
@@ -82,7 +82,7 @@ class MPDataSet(Dataset):
 
     if self.contact:
       pdb_chains  = row['pdb_chains']
-      csv_path = os.path.join(self.project_root, 'data', 'mp', f'{pdb_chains}.csv')
+      csv_path = os.path.join(self.project_root, 'data', 'mp', f'{pdb_chains}_pesudo.csv')
 
       contact_df = pd.read_csv(csv_path, header=0, index_col=0)
       contact_mhc_seq = "".join(contact_df.index.astype(str))
@@ -101,7 +101,7 @@ class MPDataSet(Dataset):
                   f"mhc='{mhc_seq}', pep='{pep_seq}'"
               )
       
-      contact_prob = (contact_dist < 5.0).astype(np.float32)
+      contact_prob = (contact_dist < 4.0).astype(np.float32)
 
       if contact_dist.ndim != 2 or contact_prob.ndim != 2:
           raise ValueError(f'contact matrix must be 2D')
@@ -205,7 +205,7 @@ class MPTDataSet(Dataset):
     self.aa_dict = mk_aa_dict()
     self.bv_dict = mk_bv_dict()
     self.pseudo_mhc_dict = load_mhc_dict(mhc_type, pseudo=True)
-    self.esm2_mhc_dict = load_mhc_dict(mhc_type, pseudo=False)
+    self.esm_mhc_dict = load_mhc_dict(mhc_type, pseudo=False)
 
   def __len__(self):
     return len(self.df)
@@ -220,7 +220,7 @@ class MPTDataSet(Dataset):
     mhc_ids = aa_to_vec(mhc_seq, self.aa_dict)                 # 1D ids
     mhc_ids = pad_1d(mhc_ids, self.mhc_max_len, pad_value=0, dtype=int)
 
-    esm2_mhc = mhc_to_esm2(mhc_name, self.esm2_mhc_dict) 
+    esm_mhc = mhc_to_esm(mhc_name, self.esm_mhc_dict) 
 
     pep_ids = aa_to_vec(pep_seq, self.aa_dict)
     if self.mask is not None and random.random() < self.mask:
@@ -236,7 +236,7 @@ class MPTDataSet(Dataset):
        'mhc': torch.as_tensor(mhc_ids, dtype=torch.long),
         'peptide': torch.as_tensor(pep_ids, dtype=torch.long),
         'cdr3': torch.as_tensor(cdr3_ids, dtype=torch.long),
-        'esm2_mhc': torch.as_tensor(esm2_mhc, dtype=torch.float32)
+        'esm_mhc': torch.as_tensor(esm_mhc, dtype=torch.float32)
     }
 
     if self.bv:

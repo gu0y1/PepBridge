@@ -38,7 +38,7 @@ def load_mhc_dict(mhc_type, pseudo=True):
     if pseudo:
         file_name = 'pseudo_MHCI.csv' if mhc_type == 'MHCI' else 'pseudo_MHCII.csv'
     else:
-        file_name = 'esm2_emb_MHCI.pkl' if mhc_type == 'MHCI' else 'esm2_emb_MHCII.pkl'
+        file_name = 'esm_emb_MHCI.pkl' if mhc_type == 'MHCI' else 'esm_emb_MHCII.pkl'
     file_path = os.path.join(project_root, 'doc', file_name)
     if pseudo:
         mhc_data = pd.read_csv(file_path, index_col=0)
@@ -99,11 +99,11 @@ def mhc_to_aa(mhc_name, mhc_dict):
         raise KeyError(f"MHC name '{mhc_name}' not found in mhc_dict.")
     return mhc_aa
 
-def mhc_to_esm2(mhc_name, esm2_dict):
-    mhc_esm2_emb = esm2_dict.get(mhc_name)
-    if mhc_esm2_emb is None:
-        raise KeyError(f"MHC name '{mhc_name}' not found in esm2_dict.")
-    return mhc_esm2_emb
+def mhc_to_esm(mhc_name, esm_dict):
+    mhc_esm_emb = esm_dict.get(mhc_name)
+    if mhc_esm_emb is None:
+        raise KeyError(f"MHC name '{mhc_name}' not found in esm_dict.")
+    return mhc_esm_emb
 
 def labelMap(df, label):
     return df[label].to_numpy()

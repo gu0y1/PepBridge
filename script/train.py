@@ -46,13 +46,13 @@ def train_three_phases_multi_loaders(
 ):
     """
     loaders key: value
-      align         -> (mhc, peptide, cdr3, esm2_mhc)
-      mp            -> (mhc, peptide, esm2_mhc, y_mp)
+      align         -> (mhc, peptide, cdr3, esm_mhc)
+      mp            -> (mhc, peptide, esm_mhc, y_mp)
       pt            -> (peptide, cdr3, y_pt)
-      mp_contact    -> (mhc, peptide, esm2_mhc, contact_bin, contact_dist)
+      mp_contact    -> (mhc, peptide, esm_mhc, contact_bin, contact_dist)
       pt_contact    -> (peptide, cdr3, contact_bin, contact_dist)
-      imm           -> (mhc, peptide, esm2_mhc, y_imm)
-      mpt           -> (mhc, peptide, cdr3, esm2_mhc, trbv, y_mpt)
+      imm           -> (mhc, peptide, esm_mhc, y_imm)
+      mpt           -> (mhc, peptide, cdr3, esm_mhc, trbv, y_mpt)
     """
     if task_every is None:
         task_every = {}
@@ -312,10 +312,10 @@ def compute_losses_multi_batches(
             mhc      = b["mhc"].to(device)
             peptide  = b["peptide"].to(device)
             cdr3     = b["cdr3"].to(device)
-            esm2_mhc = b.get("esm2_mhc", None)
-            if esm2_mhc is not None: esm2_mhc = esm2_mhc.to(device)
+            esm_mhc = b.get("esm_mhc", None)
+            if esm_mhc is not None: esm_mhc = esm_mhc.to(device)
 
-            out["align"] = model.pep_align(mhc, peptide, cdr3, esm2_mhc)
+            out["align"] = model.pep_align(mhc, peptide, cdr3, esm_mhc)
     else:
         out["align"] = torch.tensor(0.0, device=device)
 
@@ -324,11 +324,11 @@ def compute_losses_multi_batches(
         b = batches["mp"]
         mhc      = b["mhc"].to(device)
         peptide  = b["peptide"].to(device)
-        esm2_mhc = b.get("esm2_mhc", None)
-        if esm2_mhc is not None: esm2_mhc = esm2_mhc.to(device)
+        esm_mhc = b.get("esm_mhc", None)
+        if esm_mhc is not None: esm_mhc = esm_mhc.to(device)
         y_mp     = b["y_mp"].to(device).view(-1, 1)
 
-        mp_out = model.mp_pred(mhc, peptide, esm2_mhc, contact=False, immunogenicity=(phase=="C"))
+        mp_out = model.mp_pred(mhc, peptide, esm_mhc, contact=False, immunogenicity=(phase=="C"))
         out["MP"] = bce_loss(mp_out["binding_prob"], y_mp)
 
         # L_logic_IMM
@@ -352,10 +352,10 @@ def compute_losses_multi_batches(
             b = batches["mp_contact"]
             mhc      = b["mhc"].to(device)
             peptide  = b["peptide"].to(device)
-            esm2_mhc = b.get("esm2_mhc", None)
-            if esm2_mhc is not None: esm2_mhc = esm2_mhc.to(device)
+            esm_mhc = b.get("esm_mhc", None)
+            if esm_mhc is not None: esm_mhc = esm_mhc.to(device)
 
-            mp_out = model.mp_pred(mhc, peptide, esm2_mhc, contact=True, immunogenicity=False)
+            mp_out = model.mp_pred(mhc, peptide, esm_mhc, contact=True, immunogenicity=False)
 
             mask_m = mp_out["mask_dict"]["mhc"]
             mask_p = mp_out["mask_dict"]["pep"]
@@ -400,11 +400,11 @@ def compute_losses_multi_batches(
             b = batches["imm"]
             mhc      = b["mhc"].to(device)
             peptide  = b["peptide"].to(device)
-            esm2_mhc = b.get("esm2_mhc", None)
-            if esm2_mhc is not None: esm2_mhc = esm2_mhc.to(device)
+            esm_mhc = b.get("esm_mhc", None)
+            if esm_mhc is not None: esm_mhc = esm_mhc.to(device)
             y_imm    = b["y_imm"].to(device).view(-1, 1)
 
-            mp_out = model.mp_pred(mhc, peptide, esm2_mhc, contact=False, immunogenicity=True)
+            mp_out = model.mp_pred(mhc, peptide, esm_mhc, contact=False, immunogenicity=True)
             out["IMM"] = bce_loss(mp_out["immunogenicity_prob"], y_imm)
 
             # L_logic_IMM
@@ -417,13 +417,13 @@ def compute_losses_multi_batches(
         mhc      = b["mhc"].to(device)
         peptide  = b["peptide"].to(device)
         cdr3     = b["cdr3"].to(device)
-        esm2_mhc = b.get("esm2_mhc", None)
-        if esm2_mhc is not None: esm2_mhc = esm2_mhc.to(device)
+        esm_mhc = b.get("esm_mhc", None)
+        if esm_mhc is not None: esm_mhc = esm_mhc.to(device)
         trbv     = b.get("trbv", None)
         if trbv is not None: trbv = trbv.to(device)
         y_mpt    = b["y_mpt"].to(device).view(-1, 1)
 
-        mpt_out = model.mpt_pred(mhc, peptide, cdr3, esm2_mhc, trbv)
+        mpt_out = model.mpt_pred(mhc, peptide, cdr3, esm_mhc, trbv)
         out["MPT"] = bce_loss(mpt_out["mpt_prob"], y_mpt)
 
         # L_logic_MPT = ReLU(P_MPT - min(P_MP, P_PT))

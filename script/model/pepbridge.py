@@ -66,21 +66,21 @@ class PepBridge(nn.Module):
         if x is None:
             return None
         # 0 为 pad
-        return (x != 0)
+        return (x != 0).clone().detach()
 
     def aa_seq_encode(
         self,
         mhc: Optional[torch.Tensor] = None,
         peptide: Optional[torch.Tensor] = None,
         cdr3: Optional[torch.Tensor] = None,
-        esm2_mhc: Optional[torch.Tensor] = None,
+        esm_mhc: Optional[torch.Tensor] = None,
     ):
         repr_dict, mask_dict, chain_id_dict = {}, {}, {}
 
         if mhc is not None:
             mhc_mask = self._tokens_to_mask(mhc).bool()
             mhc_chain_id = torch.zeros_like(mhc)
-            mhc_seq, mhc_pair = self.mhc_encoder(mhc, mhc_mask, esm2_mhc)
+            mhc_seq, mhc_pair = self.mhc_encoder(mhc, mhc_mask, esm_mhc)
             mhc_seq = self.mhc_ln(mhc_seq + self.chain_id_embedder(mhc_chain_id))
             repr_dict['mhc_seq'], repr_dict['mhc_pair'] = mhc_seq, mhc_pair
             mask_dict['mhc'], chain_id_dict['mhc'] = mhc_mask, mhc_chain_id
@@ -207,8 +207,8 @@ class PepBridge(nn.Module):
     # -----------------------------
     # High-level tasks
     # -----------------------------
-    def mp_pred(self, mhc, peptide, esm2_mhc, contact: bool = False, immunogenicity: bool = False, repr_out: bool = False):
-        repr_dict, mask_dict, chain_id_dict = self.aa_seq_encode(mhc=mhc, peptide=peptide, esm2_mhc=esm2_mhc)
+    def mp_pred(self, mhc, peptide, esm_mhc, contact: bool = False, immunogenicity: bool = False, repr_out: bool = False):
+        repr_dict, mask_dict, chain_id_dict = self.aa_seq_encode(mhc=mhc, peptide=peptide, esm_mhc=esm_mhc)
 
         mp_seq, mp_pair = self.mp_repr_encode(
             repr_dict['mhc_seq'], repr_dict['mhc_pair'],
@@ -239,7 +239,7 @@ class PepBridge(nn.Module):
             
         if immunogenicity:
             imm_prob = self._pred(
-                seq_repr=mp_seq, pair_repr=mp_pair,
+                seq_repr=mp_seq.detach(), pair_repr=mp_pair.detach(),
                 chain_id_a=chain_id_dict['mhc'], chain_id_b=chain_id_dict['pep'],
                 mask_a=mask_dict['mhc'], mask_b=mask_dict['pep'],
                 pred_head=self.imm_pred_head, task='binding'
@@ -284,8 +284,8 @@ class PepBridge(nn.Module):
             output['seq_repr'], output['pair_repr'] = pt_seq, pt_pair
         return output
 
-    def mpt_pred(self, mhc, peptide, cdr3, esm2_mhc, trbv):
-        mp_out = self.mp_pred(mhc, peptide, esm2_mhc, contact=False, immunogenicity=False, repr_out=True)
+    def mpt_pred(self, mhc, peptide, cdr3, esm_mhc, trbv):
+        mp_out = self.mp_pred(mhc, peptide, esm_mhc, contact=False, immunogenicity=False, repr_out=True)
         pt_out = self.pt_pred(peptide, cdr3, contact=False, repr_out=True)
 
         seq, pair = self.mpt_repr_encode(
@@ -304,9 +304,9 @@ class PepBridge(nn.Module):
             'pt_prob': pt_out['binding_prob'],
         }
     
-    def pep_align(self, mhc, peptide, cdr3, esm2_mhc):
+    def pep_align(self, mhc, peptide, cdr3, esm_mhc):
         """Alignment of peptide representation"""
-        repr_dict, mask_dict, _ = self.aa_seq_encode(mhc=mhc, peptide=peptide, cdr3=cdr3, esm2_mhc=esm2_mhc)
+        repr_dict, mask_dict, _ = self.aa_seq_encode(mhc=mhc, peptide=peptide, cdr3=cdr3, esm_mhc=esm_mhc)
 
         mp_seq, mp_pair = self.mp_repr_encode(
             repr_dict['mhc_seq'], repr_dict['mhc_pair'],
@@ -333,8 +333,8 @@ class PepBridge(nn.Module):
 
         return seq_align_loss + pair_align_loss
     
-    def forward(self, mhc, peptide, cdr3, esm2_mhc, trbv):
-        mp_out = self.mp_pred(mhc, peptide, esm2_mhc, contact=True, immunogenicity=True, repr_out=True)
+    def forward(self, mhc, peptide, cdr3, esm_mhc, trbv):
+        mp_out = self.mp_pred(mhc, peptide, esm_mhc, contact=True, immunogenicity=True, repr_out=True)
         pt_out = self.pt_pred(peptide, cdr3, contact=True, repr_out=True)
 
         seq, pair = self.mpt_repr_encode(

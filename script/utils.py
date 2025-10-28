@@ -9,6 +9,19 @@ from torch.utils.data import DataLoader, Subset
 from train import train_three_phases_multi_loaders, evaluate_phase_multi
 from model.pepbridge import PepBridge
 
+import csv
+import pandas as pd
+
+def read_csv_with_index_allow_duplicate_names(path):
+    with open(path, newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader)      
+        data = list(reader)
+
+    df = pd.DataFrame(data, columns=header)
+    df.set_index(df.columns[0], inplace=True)
+    return df
+
 def model_fn(aa_vocab_size=22, trbv_vocab_size=77):
     model = PepBridge(
         aa_size=aa_vocab_size,

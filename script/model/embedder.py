@@ -58,22 +58,22 @@ class Embedder(nn.Module):
         self.drop = nn.Dropout(dropout)
 
         if mhc:
-            self.mhc_poj = nn.Linear(1024, d_seq, bias=False)
+            self.mhc_poj = nn.Linear(960, d_seq, bias=False)
             self.mhc_cross_attn = nn.MultiheadAttention(embed_dim=d_seq, num_heads=4,
                                                         dropout=dropout, batch_first=True)
 
-    def forward(self, x, esm2_mhc=None):
+    def forward(self, x, esm_mhc=None):
         B, L = x.shape
 
         seq_repr = self.seq_aa_emb(x)
         pos_idx = torch.arange(L, device=x.device).unsqueeze(0).expand(B, -1) 
         seq_repr = seq_repr + self.abs_pos_emb(pos_idx)
 
-        if esm2_mhc is not None:
-            if esm2_mhc.dim() == 2:
-                esm2_mhc = esm2_mhc.unsqueeze(1)
-            esm2_mhc = self.mhc_poj(esm2_mhc)
-            attn_out = self.mhc_cross_attn(seq_repr, esm2_mhc, esm2_mhc, 
+        if esm_mhc is not None:
+            if esm_mhc.dim() == 2:
+                esm_mhc = esm_mhc.unsqueeze(1)
+            esm_mhc = self.mhc_poj(esm_mhc)
+            attn_out = self.mhc_cross_attn(seq_repr, esm_mhc, esm_mhc, 
                                            need_weights=False)
             seq_repr = seq_repr + self.drop(attn_out)
 
