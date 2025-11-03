@@ -34,16 +34,19 @@ class MaskedLM(nn.Module):
 
         self.decoder = DecoderHead(d_seq, aa_size, self.embedder.seq_aa_emb.weight)
     
-    def forward(self, aa_seq, masked_label):
+    def forward(self, aa_seq, masked_label=None):
         mask = (aa_seq != 0).clone().detach()
 
         seq_repr, pair_repr = self.embedder(aa_seq)
         seq_repr, pair_repr = self.pair_aware_trunk(seq_repr, pair_repr, mask)
 
         logits = self.decoder(seq_repr)
-        loss_fct = nn.CrossEntropyLoss(ignore_index=0)
-        mlm_loss = loss_fct(logits.reshape(-1, self.aa_size), masked_label.reshape(-1))
-        return logits, mlm_loss
+        if masked_label is None:
+            return logits
+        else:
+            loss_fct = nn.CrossEntropyLoss(ignore_index=0)
+            mlm_loss = loss_fct(logits.reshape(-1, self.aa_size), masked_label.reshape(-1))
+            return logits, mlm_loss
     
     def _encode(self, aa_seq, mask):
         if mask is None:
