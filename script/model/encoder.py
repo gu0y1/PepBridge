@@ -1,20 +1,21 @@
 import torch
 import torch.nn as nn
 
-from embedder import Embedder
-from pair_aware_block import PairAwareTrunk
+from .embedder import Embedder
+from .pair_aware_block import PairAwareTrunk
 
 class DecoderHead(nn.Module):
-    def __init__(self, d_seq, embedding_weights=None):
+    def __init__(self, d_seq, aa_size, embedding_weights=None):
+        super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(d_seq, d_seq),
             nn.ReLU(),
             nn.LayerNorm(d_seq)
         )
-        self.linear_decoder = nn.Linear(d_seq, 22)
+        self.linear_decoder = nn.Linear(d_seq, aa_size)
         if embedding_weights is not None:
             self.linear_decoder.weight = nn.Parameter(embedding_weights)
-        self.linear_decoder.bias = nn.Parameter(torch.zeros(22))
+        self.linear_decoder.bias = nn.Parameter(torch.zeros(aa_size))
     
     def forward(self, seq_repr):
         logits = self.linear_decoder(self.mlp(seq_repr))
@@ -31,7 +32,7 @@ class MaskedLM(nn.Module):
                                                d_pair, d_head_pair, 
                                                dropout, n_layers)
 
-        self.decoder = DecoderHead(d_seq, self.embedder.seq_aa_emb.weight)
+        self.decoder = DecoderHead(d_seq, aa_size, self.embedder.seq_aa_emb.weight)
     
     def forward(self, aa_seq, masked_label):
         mask = (aa_seq != 0).clone().detach()

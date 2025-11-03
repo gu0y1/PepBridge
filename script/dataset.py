@@ -5,7 +5,7 @@ import pandas as pd
 import random
 import os
 
-from dataprocess import mk_aa_dict, mk_bv_dict, load_mhc_dict,\
+from .dataprocess import mk_aa_dict, mk_bv_dict, load_mhc_dict,\
     aa_to_vec, pad_1d, pad_2d, get_masked_sample, mhc_to_aa, mhc_to_esm
 
 class MaskedLMDataSet(Dataset):
@@ -26,11 +26,10 @@ class MaskedLMDataSet(Dataset):
                                           self.masked_rate, self.contiguous_prob)
     mlm_input_tokens_id = pad_1d(mlm_input_tokens_id, self.max_len)
     mlm_label = pad_1d(mlm_label, self.max_len)
-    return (
-        torch.as_tensor(mlm_input_tokens_id, dtype=torch.long),
-        torch.as_tensor(mlm_label, dtype=torch.long),
-        idx
-    )
+    out = {}
+    out['mlm_input'] = torch.as_tensor(mlm_input_tokens_id, dtype=torch.long)
+    out['mlm_label'] = torch.as_tensor(mlm_label, dtype=torch.long)
+    return out, idx
 
 class MPDataSet(Dataset):
   def __init__(self, mp_df, mhc_type, mhc_max_len, pep_max_len,
@@ -240,7 +239,7 @@ class MPTDataSet(Dataset):
     }
 
     if self.bv:
-        bv_name = row['trbv']
+        bv_name = row['v_gene']
         out['trbv'] = torch.tensor(self.bv_dict.get(bv_name, 0), dtype=torch.long)
         
     if self.binding:

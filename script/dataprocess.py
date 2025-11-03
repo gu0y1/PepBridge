@@ -8,25 +8,26 @@ import pandas as pd
 def mk_aa_dict():
     """Returns the amino acid dictionary mapping."""
     amino_acid_dict = {
-        'X': 0,
+        '[PAD]': 0,
         'A': 1, 'R': 2, 'N': 3, 'D': 4, 'C': 5,
         'Q': 6, 'E': 7, 'G': 8, 'H': 9, 'I': 10,
         'L': 11, 'K': 12, 'M': 13, 'F': 14, 'P': 15,
         'S': 16, 'T': 17, 'W': 18, 'Y': 19, 'V': 20,
-        '[MASK]': 21
+        'X':21, '[MASK]': 22, '[CLS]': 23, '[SEP]': 24,
+        '[UNK]':25
     }
     return amino_acid_dict
 
 def mk_bv_dict():
     bv_dict = {
-        'X': 0,'TRBV1': 1,'TRBV10-1': 2,'TRBV10-2': 3,'TRBV10-3': 4,'TRBV11-1': 5,'TRBV11-2': 6,'TRBV11-3': 7,'TRBV12-1': 8,'TRBV12-2': 9,
+        '[PAD]': 0,'TRBV1': 1,'TRBV10-1': 2,'TRBV10-2': 3,'TRBV10-3': 4,'TRBV11-1': 5,'TRBV11-2': 6,'TRBV11-3': 7,'TRBV12-1': 8,'TRBV12-2': 9,
         'TRBV12-3': 10,'TRBV12-4': 11,'TRBV12-5': 12,'TRBV13': 13,'TRBV14': 14,'TRBV15': 15,'TRBV16': 16,'TRBV17': 17,'TRBV18': 18,'TRBV19': 19,
         'TRBV2': 20,'TRBV20-1': 21,'TRBV20/OR9-2': 22,'TRBV21-1': 23,'TRBV21/OR9-2': 24,'TRBV22-1': 25,'TRBV22/OR9-2': 26,'TRBV23-1': 27,'TRBV23/OR9-2': 28,
         'TRBV24-1': 29,'TRBV24/OR9-2': 30,'TRBV25-1': 31,'TRBV26': 32,'TRBV26/OR9-2': 33,'TRBV27': 34,'TRBV28': 35,'TRBV29-1': 36,'TRBV29/OR9-2': 37,'TRBV3-1': 38,
         'TRBV30': 39,'TRBV4-1': 40,'TRBV4-2': 41,'TRBV4-3': 42,'TRBV5-1': 43,'TRBV5-2': 44,'TRBV5-3': 45,'TRBV5-4': 46,'TRBV5-5': 47,'TRBV5-6': 48,'TRBV5-7': 49,
         'TRBV5-8': 50,'TRBV6-1': 51,'TRBV6-2': 52,'TRBV6-4': 53,'TRBV6-5': 54,'TRBV6-6': 55,'TRBV6-7': 56,'TRBV6-8': 57,'TRBV6-9': 58,'TRBV7-1': 59,'TRBV7-2': 60,
         'TRBV7-3': 61,'TRBV7-4': 62,'TRBV7-5': 63,'TRBV7-6': 64,'TRBV7-7': 65,'TRBV7-8': 66,'TRBV7-9': 67,'TRBV8-1': 68,'TRBV8-2': 69,'TRBV9': 70,'TRBVA': 71,
-        'TRBVB': 72, 'TRBV6-3': 73, 'TRBV3-2':74, 'TRBVA/OR9-2':75, 'TRBV25/OR9-2':76
+        'TRBVB': 72, 'TRBV6-3': 73, 'TRBV3-2':74, 'TRBVA/OR9-2':75, 'TRBV25/OR9-2':76, '[UNK]':77
     }
     return bv_dict
 
@@ -50,7 +51,7 @@ def load_mhc_dict(mhc_type, pseudo=True):
 
 def aa_to_vec(aa_seq, aa_dict):
     """Converts an amino acid sequence to a vector representation."""
-    sequence = sequence.replace(u'\xa0', u'').upper()
+    aa_seq = aa_seq.replace(u'\xa0', u'').upper()
     return np.array([aa_dict.get(aa, aa_dict['X']) for aa in aa_seq], dtype=int)
 
 def pad_1d(arr, max_len, pad_value=0, dtype=int):
@@ -103,6 +104,12 @@ def mhc_to_esm(mhc_name, esm_dict):
     mhc_esm_emb = esm_dict.get(mhc_name)
     if mhc_esm_emb is None:
         raise KeyError(f"MHC name '{mhc_name}' not found in esm_dict.")
+    
+    pad_rows = 369 - mhc_esm_emb.shape[0]
+    if pad_rows > 0:
+        padding = np.zeros((pad_rows, mhc_esm_emb.shape[1]), dtype=mhc_esm_emb.dtype)
+        mhc_esm_emb = np.concatenate([mhc_esm_emb, padding], axis=0) 
+        
     return mhc_esm_emb
 
 def labelMap(df, label):
@@ -139,7 +146,8 @@ def replace_masked_tokens(token_ids, candidate_positions, num_mlm_preds, vocab_d
         pred_positions = set(cand[:num_mlm_preds])
 
     ban = {vocab_dict.get('[CLS]'), vocab_dict.get('[SEP]'),
-        vocab_dict.get('[MASK]'), vocab_dict.get('X')}
+        vocab_dict.get('[MASK]'), vocab_dict.get('X'),
+        vocab_dict.get('[PAD]'),vocab_dict.get('[UNK]') }
     valid_ids = [vid for vid in set(vocab_dict.values()) if vid not in ban]
     if not valid_ids:
         valid_ids = [vocab_dict['[MASK]']]
@@ -156,7 +164,7 @@ def replace_masked_tokens(token_ids, candidate_positions, num_mlm_preds, vocab_d
         mlm_input_tokens_id[pos] = masked_token_id
 
     mlm_label = [
-        vocab_dict['X'] if idx not in pred_positions else token_ids[idx] 
+        vocab_dict['[PAD]'] if idx not in pred_positions else token_ids[idx] 
         for idx in range(len(token_ids))
     ]
     return mlm_input_tokens_id, mlm_label

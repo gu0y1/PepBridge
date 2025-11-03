@@ -158,3 +158,9 @@ def loss_pair_pseudolikelihood(
 
     loss = loss_ce + loss_reg
     return loss, {"pair_ce": loss_ce.detach(), "pair_reg": loss_reg.detach()}
+
+def margin_loss(p_pos, p_neg, m=1, rho=0.03):
+    margin = F.relu(m+p_neg-p_pos)
+    reg = rho * torch.sqrt(p_neg ** 2 + p_pos ** 2)
+    return (margin + reg).mean()
+    

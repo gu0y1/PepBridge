@@ -58,7 +58,7 @@ class Embedder(nn.Module):
         self.drop = nn.Dropout(dropout)
 
         if mhc:
-            self.mhc_poj = nn.Linear(960, d_seq, bias=False)
+            self.mhc_poj = nn.Linear(96, d_seq, bias=False)
             self.mhc_cross_attn = nn.MultiheadAttention(embed_dim=d_seq, num_heads=4,
                                                         dropout=dropout, batch_first=True)
 

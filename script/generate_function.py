@@ -71,7 +71,8 @@ def band_topk_strength_pair_mask(pair_mask, pair_logits, W=3, topk=3):
 
     return pm_out.astype(pair_mask.dtype)
 
-def infer_mrf(seq_logits, pair_logits, seq_mask, pair_mask, T, steps=5, forbid_indices=(0,21)):
+def infer_mrf(seq_logits, pair_logits, seq_mask, pair_mask, T, steps=5, 
+              forbid_indices=(0,21,22,23,24,25)):
     """
     单点Gibbs/ICM推理：
       scores_i(a) = h_i(a) + sum_{k: pm[i,k]=1} e_{i,k}(a, x_k)

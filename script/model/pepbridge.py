@@ -1,12 +1,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple, Callable, Union
+from typing import Optional, Callable, Union
 
-from pair_aware_block import PairAwareTrunk
-from encoder import Encoder
-from joint_embedder import JointEmbedder
-from predicted_head import PredHead, ContactPredHead
+from .pair_aware_block import PairAwareTrunk
+from .encoder import Encoder
+from .joint_embedder import JointEmbedder
+from .predicted_head import PredHead, ContactPredHead
 
 HeadType = Union[torch.nn.Module, Callable[..., torch.Tensor]]
 

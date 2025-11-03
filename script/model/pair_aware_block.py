@@ -264,15 +264,15 @@ class TriangleAttention(nn.Module):
             mask = mask.transpose(1, 2)
 
         # bias terms
-        mask_bias = (self.inf * (mask.to(z.dtype) - 1))[..., :, None, None, :] # [*, I, 1, 1, J]
-        tri_bias = rearrange(self.w_bias(z), "... i j h -> ... 1 h i j")
-        
+        mask_bias = (self.inf * (mask.to(z.dtype) - 1))[..., None, :,  None, :] # [*, 1, I, 1, J]
+        tri_bias = rearrange(self.w_bias(z), "... i j h -> ... h i 1 j") # [*, H, I, 1, J]
+
         q = rearrange(self.q_proj(z), "... i j (h c) -> ... h i j c", h=self.num_heads)
         k = rearrange(self.k_proj(z), "... i j (h c) -> ... h i j c", h=self.num_heads)
         v = rearrange(self.v_proj(z), "... i j (h c) -> ... h i j c", h=self.num_heads)
 
         q = self.rescale_factor * q
-
+       
         a = torch.einsum("bhijc,bhikc->bhijk", q, k) #[*, H, I, J, J]
         a = a + mask_bias + tri_bias
         a = F.softmax(a, dim=-1)
@@ -322,8 +322,8 @@ class PairAwareBlock(nn.Module):
         self.tri_attn_end = TriangleAttention(d_pair, num_heads_pair, d_head_pair, 
                                               starting=False, inf=1e9, gate=True)
         
-        self.trans_seq = Transition(d_seq, 2, dropout)
-        self.trans_pair = Transition(d_pair, 2, dropout)
+        self.trans_seq = Transition(d_seq, 4, dropout)
+        self.trans_pair = Transition(d_pair, 4, dropout)
 
         assert 0 <= dropout < 0.5   
         self.drop = nn.Dropout(dropout)

@@ -7,8 +7,8 @@ import random
 import math
 import numpy as np
 
-from pepbridge import PepBridge
-from pair_aware_block import PairAwareTrunk
+from .pepbridge import PepBridge
+from .pair_aware_block import PairAwareTrunk
 
 class SeqHead(nn.Module):
     def __init__(self, d_seq, aa_size):

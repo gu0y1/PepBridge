@@ -7,8 +7,8 @@ import math
 from typing import Dict, Optional, Iterable, Tuple
 from collections import defaultdict
 
-from loss import contact_losses, bce_loss
-from model.lora import build_model_with_lora
+from .loss import contact_losses, bce_loss
+from .model.lora import build_model_with_lora
 
 task_every = {
     "mp_contact": 10,  
@@ -33,7 +33,6 @@ def train_three_phases_multi_loaders(
     optimizer_ctor=lambda params: torch.optim.AdamW(params, lr=1e-3, weight_decay=0.01),
     grad_accum_steps=1,
     amp=True,
-    use_logits=False,
     new_optimizer_each_phase=True,
     log_interval=50,
     task_every: Dict[str, int] = None,   #
@@ -66,8 +65,8 @@ def train_three_phases_multi_loaders(
         model = build_model_with_lora(model, last_n, cfg_seq_pair, dropout=0.1, freeze_base=True)
 
     # λ
-    lambdas_A = dict(align=0.10, MP=1.00, PT=1.00, IMM=0.0, contact=0.0, MPT=0.0, lg=0.0)
-    lambdas_B = dict(align=0.10, MP=0.80, PT=0.80, IMM=0.0, contact=0.10, MPT=0.0, lg=0.0)
+    lambdas_A = dict(align=0.20, MP=1.00, PT=1.00, IMM=0.0, contact=0.0, MPT=0.0, lg=0.0)
+    lambdas_B = dict(align=0.15, MP=0.80, PT=0.80, IMM=0.0, contact=0.10, MPT=0.0, lg=0.0)
     lambdas_C = dict(align=0.10, MP=0.50, PT=0.50, IMM=0.60, contact=0.10, MPT=0.60, lg=0.30)
 
     phases = {
