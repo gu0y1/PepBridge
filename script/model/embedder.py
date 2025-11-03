@@ -20,7 +20,7 @@ class RelativePositionEmbedding(nn.Module):
 
     def forward(
         self,
-        residue_index: torch.Tensor,      # [B, L] 或 [L]
+        residue_index: torch.Tensor,      # [B, L]
         chain_id: torch.Tensor | None = None,  # [B, L]
     ) -> torch.Tensor:
         """
@@ -52,7 +52,8 @@ class Embedder(nn.Module):
 
         self.pair_aa_emb_i =  nn.Embedding(aa_size, d_pair, padding_idx=0)
         self.pair_aa_emb_j=  nn.Embedding(aa_size, d_pair, padding_idx=0)
-        self.rel_pos_emb = RelativePositionEmbedding(d_pair, 32)
+        self.rel_pos_emb = RelativePositionEmbedding(d_pair, K=max_len-1, 
+                                                     add_break_bucket=False)
         self.pair_ln = nn.LayerNorm(d_pair)
 
         self.drop = nn.Dropout(dropout)
@@ -78,14 +79,11 @@ class Embedder(nn.Module):
             seq_repr = seq_repr + self.drop(attn_out)
 
         seq_repr = self.drop(self.seq_ln(seq_repr))
-        # seq_repr = seq_repr * mask.unsqueeze(-1)
 
         pair_repr = self.pair_aa_emb_i(x).unsqueeze(2) + \
             self.pair_aa_emb_j(x).unsqueeze(1)
         relpos = self.rel_pos_emb(pos_idx) 
         pair_repr = pair_repr + relpos
         pair_repr = self.drop(self.pair_ln(pair_repr))
-        # pair_mask = mask.unsqueeze(1) & mask.unsqueeze(2)      # [B, L, L]
-        # pair_repr = pair_repr * pair_mask.unsqueeze(-1)
 
         return seq_repr, pair_repr

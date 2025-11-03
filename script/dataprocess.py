@@ -35,11 +35,11 @@ def load_mhc_dict(mhc_type, pseudo=True):
     current_dir = os.path.dirname(__file__)
     project_root = os.path.abspath(os.path.join(current_dir))
     
-    assert mhc_type in ('MHCI', 'MHCII'),'mhc_type must be MHCI or MHCII'
+    assert mhc_type in ('HLAI', 'HLAII'),'mhc_type must be HLAI or HLAII'
     if pseudo:
-        file_name = 'pseudo_MHCI.csv' if mhc_type == 'MHCI' else 'pseudo_MHCII.csv'
+        file_name = 'pseudo_HLAI.csv' if mhc_type == 'HLAI' else 'pseudo_HLAII.csv'
     else:
-        file_name = 'esm_emb_MHCI.pkl' if mhc_type == 'MHCI' else 'esm_emb_MHCII.pkl'
+        file_name = 'esm_emb_HLAI.pkl' if mhc_type == 'HLAI' else 'esm_emb_HLAII.pkl'
     file_path = os.path.join(project_root, 'doc', file_name)
     if pseudo:
         mhc_data = pd.read_csv(file_path, index_col=0)

@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from script.dataprocess import mk_aa_dict
 from script.utils import EarlyStopping
 
-os.chdir('/data...')
+os.chdir('/data5/tem/laiwp131/pMHC_TCR_20251103/')
 
 df = pd.read_csv('unlabel_TCRb_train.csv',
                    header=0,index_col=0)

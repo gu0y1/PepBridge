@@ -145,14 +145,15 @@ def print_trainable(model: nn.Module):
     # for n in params: print("  *", n)
 
 def build_model_with_lora(model, last_n, cfg_seq_pair=((8,16),(4,8)), dropout=0.1, 
-                          freeze_base=True):
+                          freeze_base=True, print_trainabel=False):
     inject_lora_into_trunk_last_n(
-        model.peptide_encoder, last_n,
+        model.peptide_encoder.pair_aware_trunk, last_n,
         cfg_seq_pair, dropout, freeze_base
     )
     freeze_module_except_lora(model.peptide_encoder)
     freeze_module_except_lora(model.cdr3_encoder)
-    print_trainable(model)
+    if print_trainabel:
+        print_trainable(model)
     return model
 
 ######## 

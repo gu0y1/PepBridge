@@ -65,7 +65,7 @@ class PepBridge(nn.Module):
     def _tokens_to_mask(x: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
         if x is None:
             return None
-        # 0 为 pad
+        # padding token id :0
         return (x != 0).clone().detach()
 
     def aa_seq_encode(
