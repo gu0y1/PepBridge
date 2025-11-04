@@ -1,6 +1,9 @@
 import torch
 import torch.nn.functional as F
-from torch.amp import autocast, GradScaler
+try:
+    from torch.amp import autocast, GradScaler  
+except ImportError:
+    from torch.cuda.amp import autocast, GradScaler
 
 import os
 import math

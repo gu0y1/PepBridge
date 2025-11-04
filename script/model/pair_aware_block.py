@@ -3,6 +3,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+try:
+    from torch.amp import autocast
+except ImportError:
+    from torch.cuda.amp import autocast
+
 from einops import rearrange, repeat
 
 def is_fp16_enabled():
@@ -212,7 +217,7 @@ class TriangleMultiplicativeUpdate(nn.Module):
         b = mask * self.sigmoid(self.linear_b_g(z)) * self.linear_b_p(z)
 
         if(is_fp16_enabled()):
-            with torch.amp.autocast(enabled=False):
+            with autocast(enabled=False):
                 x = self._combine_projections(a.float(), b.float(), self._outgoing)
         else:
             x = self._combine_projections(a, b, self._outgoing)
