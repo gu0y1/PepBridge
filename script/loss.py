@@ -3,7 +3,7 @@ import torch.nn.functional as F
 
 from typing import Optional
 
-def mask_mean(x: torch.Tensor, mask: Optional[torch.Tensor]):
+def mask_mean(x, mask=None):
     if mask is None:
         return x.mean()
     valid = mask.to(dtype=x.dtype)
@@ -13,12 +13,8 @@ def mask_mean(x: torch.Tensor, mask: Optional[torch.Tensor]):
         return x.new_zeros(())
     return s / n
 
-def contact_losses(prob_pred: torch.Tensor,
-                   dist_pred: Optional[torch.Tensor],
-                   prob_tgt: Optional[torch.Tensor],
-                   dist_tgt: Optional[torch.Tensor],
-                   pair_mask: Optional[torch.Tensor],
-                   *, use_logits: bool = False):
+def contact_losses(prob_pred, dist_pred, prob_tgt,
+                   dist_tgt, pair_mask, use_logits=False):
     # squeeze（if [..., 1]）
     if prob_pred.dim() == 4 and prob_pred.size(-1) == 1:
         prob_pred = prob_pred.squeeze(-1)
@@ -43,7 +39,7 @@ def contact_losses(prob_pred: torch.Tensor,
 
     return loss_prob, loss_dist
 
-def bce_loss(pred, target, *, use_logits: bool = False, reduction: str = "mean"):
+def bce_loss(pred, target, use_logits=False, reduction="mean"):
     if use_logits:
         return F.binary_cross_entropy_with_logits(pred, target, reduction=reduction)
     else:

@@ -21,7 +21,7 @@ df_train = df.drop(df_valid.index)
 
 aa_dict = mk_aa_dict()
 lm_config = {
-    'max_len':15,'d_seq':128, 'd_pair':64,
+    'max_len':10,'d_seq':128, 'd_pair':64,
     'd_head':32, 'dropout':0.1, 'n_layers':6
 }
 

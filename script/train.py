@@ -35,13 +35,13 @@ def train_three_phases_multi_loaders(
     amp=True,
     new_optimizer_each_phase=True,
     log_interval=50,
-    task_every: Dict[str, int] = None,   #
-    val_loaders: Optional[Dict[str, Iterable]] = None,
-    eval_every_epochs: int = 1,
+    task_every = None,   #
+    val_loaders= None,
+    eval_every_epochs=1,
     pep_align=True,
     use_lora=True,
-    last_n: int = 2,
-    cfg_seq_pair: Tuple[Tuple[int,int], Tuple[int,int]] = ((8,16),(4,8))
+    last_n=2,
+    cfg_seq_pair=((8,16),(4,8))
 ):
     """
     loaders key: value
@@ -128,7 +128,7 @@ def _train_one_phase_multi(
     amp: bool,
     log_interval: int,
     task_every: Dict[str, int],            #
-    val_loaders: Optional[Dict[str, Iterable]] = None,
+    val_loaders=None,
     eval_every_epochs: int = 1,
     pep_align=True,
 ):
@@ -237,11 +237,11 @@ def _train_one_phase_multi(
 @torch.no_grad()
 def evaluate_phase_multi(
     model,
-    val_loaders: Optional[Dict[str, Iterable]],
+    val_loaders,
     device: str,
     phase_name: str,
     lambdas: Dict[str, float],
-    max_batches: Optional[int] = None, 
+    max_batches=None, 
     pep_align=True
 ) -> Tuple[Dict[str, float], float]:
     if not val_loaders:

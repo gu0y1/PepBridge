@@ -35,18 +35,12 @@ def bertscore(seq_emb, cand_emb, ref_mask, cand_mask):
 
     sim = torch.matmul(cand_norm, ref_norm.transpose(1, 2))   # [B, Lc, Lr]
 
-    # 把pad位置的相似度干掉
-    # cand pad 的行全是无效
     sim = sim.masked_fill(cand_mask.unsqueeze(-1) == 0, -1e4)
-    # ref pad 的列全是无效
     sim = sim.masked_fill(ref_mask.unsqueeze(1) == 0, -1e4)
 
-    # precision: 对每个 cand token 在 ref 里取最大
     prec_tok = sim.max(dim=2).values                # [B, Lc]
-    # 只对有效的cand取平均
     prec = (prec_tok * cand_mask).sum(dim=1) / cand_mask.sum(dim=1).clamp_min(1.0)
 
-    # recall: 对每个 ref token 在 cand 里取最大
     rec_tok = sim.max(dim=1).values                 # [B, Lr]
     rec = (rec_tok * ref_mask).sum(dim=1) / ref_mask.sum(dim=1).clamp_min(1.0)
 
