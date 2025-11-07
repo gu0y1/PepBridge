@@ -1,6 +1,6 @@
-import os, json, random
+import os, json
 from typing import Dict, Optional, Callable, Any, Tuple
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 
 import numpy as np
 import torch
@@ -11,6 +11,42 @@ from .model.pepbridge import PepBridge
 
 import csv
 import pandas as pd
+
+def unwrap_sd(obj):
+    sd = obj.get("state_dict", obj) if isinstance(obj, dict) else obj
+    out = OrderedDict()
+    for k, v in sd.items():
+        if k.startswith("module."): k = k[7:]
+        if k.startswith("model."):  k = k[6:]
+        out[k] = v
+    return out
+
+def take_embed_trunk(sd):
+    return {k: v for k, v in sd.items()
+            if k.startswith("embedder.") or k.startswith("pair_aware_trunk.")}
+
+def encoder_load_state_dict(model, peptide_pt_path, cdr3_pt_path, device):
+    pep_mlm_sd  = take_embed_trunk(unwrap_sd(torch.load(peptide_pt_path, 
+                                                        map_location=device)))
+    cdr3_mlm_sd = take_embed_trunk(unwrap_sd(torch.load(cdr3_pt_path, 
+                                                        map_location=device)))
+    
+    model.peptide_encoder.load_state_dict(pep_mlm_sd,  strict=True)
+    model.cdr3_encoder.load_state_dict(cdr3_mlm_sd,   strict=True)
+
+    assert all(torch.equal(getattr(model,enc).state_dict()[k], 
+                           sd[k].to(getattr(model,enc).state_dict()[k].device,
+                           dtype=getattr(model,enc).state_dict()[k].dtype)) for enc, sd in [('peptide_encoder', pep_mlm_sd), ('cdr3_encoder', cdr3_mlm_sd)] for k in sd)
+    
+    return model
+
+def df_train_test_split(df, val_split, seed):
+    df_val = df.sample(frac=val_split, random_state=seed)
+    df_train = df.drop(df_val.index)
+
+    df_val = df_val.reset_index(drop=True)
+    df_train = df_train.reset_index(drop=True)
+    return df_train, df_val
 
 def read_csv_with_index_allow_duplicate_names(path):
     with open(path, newline="") as f:
@@ -29,18 +65,11 @@ def model_fn(aa_vocab_size=26, trbv_vocab_size=78):
         d_seq=128, d_head_seq=32,
         d_pair=64, d_head_pair=32,
         dropout=0.1,
-        n_layers_dict={"mhc":3, "peptide":6, "cdr3":6, "mp":3, "pt":3, "mpt":1},
+        n_layers_dict={"mhc":3, "peptide":6, "cdr3":6,
+                        "mp":3, "pt":3, "mpt":1},
         trbv_size=trbv_vocab_size,
     )
     return model
-
-def seed_everything(seed: int = 42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
 def _make_folds(n_samples: int, n_splits: int, shuffle: bool, seed: int,
                 y: Optional[np.ndarray]) -> list[tuple[np.ndarray, np.ndarray]]:
@@ -285,3 +314,12 @@ class EarlyStopping:
             self.trace_func(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving model ...')
         torch.save(model.state_dict(), self.path)
         self.val_loss_min = val_loss
+
+
+# def seed_everything(seed: int = 42):
+#     random.seed(seed)
+#     np.random.seed(seed)
+#     torch.manual_seed(seed)
+#     torch.cuda.manual_seed_all(seed)
+#     torch.backends.cudnn.deterministic = True
+#     torch.backends.cudnn.benchmark = False

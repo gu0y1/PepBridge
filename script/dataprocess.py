@@ -33,7 +33,7 @@ def mk_bv_dict():
 
 def load_mhc_dict(mhc_type, pseudo=True):
     current_dir = os.path.dirname(__file__)
-    project_root = os.path.abspath(os.path.join(current_dir))
+    project_root = os.path.abspath(os.path.join(current_dir, os.pardir))
     
     assert mhc_type in ('HLAI', 'HLAII'),'mhc_type must be HLAI or HLAII'
     if pseudo:

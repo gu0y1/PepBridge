@@ -331,7 +331,7 @@ class PepBridge(nn.Module):
         pair_mask = (pep_mask.unsqueeze(2) & pep_mask.unsqueeze(1))  # [B, Lp, Lp]
         pair_align_loss = F.mse_loss(pep_pair_mp[pair_mask], pep_pair_pt[pair_mask], reduction='mean')
 
-        return seq_align_loss + pair_align_loss
+        return (seq_align_loss + pair_align_loss) * 0.5
     
     def forward(self, mhc, peptide, cdr3, esm_mhc, trbv):
         mp_out = self.mp_pred(mhc, peptide, esm_mhc, contact=True, immunogenicity=True, repr_out=True)

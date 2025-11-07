@@ -74,7 +74,7 @@ class Embedder(nn.Module):
             if esm_mhc.dim() == 2:
                 esm_mhc = esm_mhc.unsqueeze(1)
             esm_mhc = self.mhc_poj(esm_mhc)
-            attn_out = self.mhc_cross_attn(seq_repr, esm_mhc, esm_mhc, 
+            attn_out,_ = self.mhc_cross_attn(seq_repr, esm_mhc, esm_mhc, 
                                            need_weights=False)
             seq_repr = seq_repr + self.drop(attn_out)
 
@@ -85,5 +85,5 @@ class Embedder(nn.Module):
         relpos = self.rel_pos_emb(pos_idx) 
         pair_repr = pair_repr + relpos
         pair_repr = self.drop(self.pair_ln(pair_repr))
-
+        
         return seq_repr, pair_repr

@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 try:
     from torch.amp import autocast, GradScaler  
@@ -9,14 +10,19 @@ import os
 import math
 from typing import Dict, Optional, Iterable, Tuple
 from collections import defaultdict
+import matplotlib.pyplot as plt
 
 from .loss import contact_losses, bce_loss
 from .model.lora import build_model_with_lora
 
 task_every = {
-    "mp_contact": 10,  
-    "pt_contact": 10,  
+    "mp_contact": 20,  
+    "pt_contact": 20,  
 }
+
+def freeze_module(mod):
+    for p in mod.parameters():
+        p.requires_grad = False
 
 def _infinite_iter(dl):
     it = iter(dl)
@@ -33,7 +39,8 @@ def train_three_phases_multi_loaders(
     device="cuda",
     save_dir="./checkpoints_multi",
     epochs_A=5, epochs_B=10, epochs_C=10,
-    optimizer_ctor=lambda params: torch.optim.AdamW(params, lr=1e-3, weight_decay=0.01),
+    steps_per_epoch=1000, 
+    optimizer_ctor=lambda params: torch.optim.AdamW(params, lr=2e-4, weight_decay=0.01),
     grad_accum_steps=1,
     amp=True,
     new_optimizer_each_phase=True,
@@ -61,11 +68,16 @@ def train_three_phases_multi_loaders(
 
     os.makedirs(save_dir, exist_ok=True)
     model = model.to(device)
-    scaler = GradScaler(enabled=amp)
+    scaler = GradScaler(enabled=amp, device=device)
 
     # lora
     if use_lora:
-        model = build_model_with_lora(model, last_n, cfg_seq_pair, dropout=0.1, freeze_base=True)
+        model = build_model_with_lora(model, last_n, cfg_seq_pair, 
+                                      dropout=0.1, freeze_base=True,
+                                      print_trainabel=True)
+    else:
+        freeze_module(model.peptide_encoder)
+        freeze_module(model.cdr3_encoder)
 
     # λ
     lambdas_A = dict(align=0.20, MP=1.00, PT=1.00, IMM=0.0, contact=0.0, MPT=0.0, lg=0.0)
@@ -77,6 +89,7 @@ def train_three_phases_multi_loaders(
         "B": dict(lmb=lambdas_B, tasks=("align", "mp", "pt", "mp_contact", "pt_contact")),
         "C": dict(lmb=lambdas_C, tasks=("align", "mp", "pt", "mp_contact", "pt_contact", "imm", "mpt")),
     }
+    recorder = MetricsRecorder()
 
     def make_optimizer():
         params = (p for p in model.parameters() if p.requires_grad)
@@ -93,7 +106,8 @@ def train_three_phases_multi_loaders(
 
         # iter
         iters = {k: _infinite_iter(dl) for k, dl in active.items()}
-        steps_per_epoch = max(len(dl) for dl in active.values())
+        if steps_per_epoch is None:
+            steps_per_epoch = max(len(dl) for dl in active.values())
 
         _train_one_phase_multi(
             model=model,
@@ -112,8 +126,12 @@ def train_three_phases_multi_loaders(
             task_every=task_every,            #
             val_loaders=val_loaders,
             eval_every_epochs=eval_every_epochs,
-            pep_align=pep_align
+            pep_align=pep_align,
+            use_lora=use_lora,
+            recorder=recorder
         )
+
+    plot_losses(recorder, out_dir=save_dir, phase=None)
 
 def _train_one_phase_multi(
     *,
@@ -134,6 +152,8 @@ def _train_one_phase_multi(
     val_loaders=None,
     eval_every_epochs: int = 1,
     pep_align=True,
+    use_lora=True,
+    recorder=None, 
 ):
     def every_of(task: str) -> int:
         v = task_every.get(task, 1)
@@ -141,23 +161,24 @@ def _train_one_phase_multi(
     
     if every_of("mp") != 1 or every_of("pt") != 1:
         print("[Warning] task_every['mp'] and task_every['pt'] setting as 1")
-    
-    global_step = 0
-
-    running_sum = defaultdict(float)
-    running_cnt = defaultdict(int) 
 
     best_val = float("inf") 
     for epoch in range(1, epochs + 1):
         model.train()
-        # running = defaultdict(float)
+        if use_lora is False:
+            model.peptide_encoder.eval()
+        model.cdr3_encoder.eval()
+
+        running_sum = defaultdict(float)
+        running_cnt = defaultdict(int) 
+
         for step in range(1, steps_per_epoch + 1):
             due_tasks = [name for name in iters.keys() if (step % every_of(name) == 0)]
             assert len(due_tasks) > 0
 
             batches = {name: next(iters[name]) for name in due_tasks}
 
-            with autocast(enabled=amp):
+            with autocast(enabled=amp,device_type=device):
                 # multi-dataloader loss
                 loss_parts = compute_losses_multi_batches(
                     model=model,
@@ -186,8 +207,6 @@ def _train_one_phase_multi(
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
 
-            global_step += 1
-
             # log
             for k, v in loss_parts.items():
                 if v.requires_grad or (v.detach().item() != 0.0):
@@ -207,8 +226,24 @@ def _train_one_phase_multi(
                        f"IMM={avg('IMM'):.4f} MPT={avg('MPT'):.4f} "
                        f"logic_imm={avg('logic_imm'):.4f} logic_mpt={avg('logic_mpt'):.4f}")
                 print(msg)
-                running_sum.clear()
-                running_cnt.clear()
+
+                if recorder is not None:
+                    rec_point = {
+                        "total": avg("total"),
+                        "align": avg("align"),
+                        "MP": avg("MP"),
+                        "PT": avg("PT"),
+                        "contact": avg("contact"),
+                        "IMM": avg("IMM"),
+                        "MPT": avg("MPT"),
+                        "logic_imm": avg("logic_imm"),
+                        "logic_mpt": avg("logic_mpt"),
+                    }
+                    recorder.log_train(
+                        phase=phase_name, epoch=epoch, step=step,
+                        steps_per_epoch=steps_per_epoch, loss_parts=rec_point
+                    )
+                running_sum.clear();running_cnt.clear()
 
         # val        
         if (val_loaders is not None) and (epoch % eval_every_epochs == 0):
@@ -221,6 +256,8 @@ def _train_one_phase_multi(
                 pep_align=pep_align
             )
             print(f"[Phase {phase_name}] epoch {epoch} VAL:", {k: f"{v:.4f}" for k, v in val_parts.items()}, f"total={val_total:.4f}")
+            if recorder is not None:
+                recorder.log_val(phase=phase_name, epoch=epoch, val_parts=val_parts, val_total=val_total)
 
             if val_total < best_val - 1e-12:
                 best_val = val_total
@@ -295,6 +332,74 @@ def evaluate_phase_multi(
 
     return means, float(val_total)
 
+class MetricsRecorder:
+    TRAIN_KEYS = ["total","align","MP","PT","contact","IMM","MPT","logic_imm","logic_mpt"]
+
+    def __init__(self):
+        self.train = []  # list of dict({'phase','epoch','step','epoch_t', each loss...})
+        self.val   = []  # list of dict({'phase','epoch', each loss...})
+
+    def log_train(self, *, phase, epoch, step, steps_per_epoch, loss_parts: dict):
+    
+        epoch_t = (epoch - 1) + (step / max(steps_per_epoch, 1))
+        row = {"phase": phase, "epoch": epoch, "step": step, "epoch_t": epoch_t}
+        for k in self.TRAIN_KEYS:
+            if k in loss_parts:
+                row[k] = float(loss_parts[k])
+        self.train.append(row)
+
+    def log_val(self, *, phase, epoch, val_parts: dict, val_total: float):
+        row = {"phase": phase, "epoch": epoch, "total": float(val_total)}
+        for k, v in val_parts.items():
+            row[k] = float(v)
+        self.val.append(row)
+
+def plot_losses(
+    recorder: MetricsRecorder,
+    out_dir: str,
+    phase: str | None = None,
+    keys = ("total","align","MP","PT","contact","IMM","MPT","logic_imm","logic_mpt"),
+    dpi: int = 200
+):
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    if not recorder.train and not recorder.val:
+        print("[plot] no data to plot.")
+        return
+
+    phases = sorted(set(r["phase"] for r in (recorder.train + recorder.val))) if phase is None else [phase]
+
+    for key in keys:
+        plt.figure(figsize=(7, 4.5))
+        has_any = False
+        for ph in phases:
+            # train
+            tr_x = [r["epoch_t"] for r in recorder.train if r["phase"] == ph and (key in r)]
+            tr_y = [r[key]        for r in recorder.train if r["phase"] == ph and (key in r)]
+            if tr_x:
+                plt.plot(tr_x, tr_y, label=f"train-{ph}", linewidth=1.8)
+                has_any = True
+            # val
+            va_x = [r["epoch"] for r in recorder.val if r["phase"] == ph and (key in r)]
+            va_y = [r[key]     for r in recorder.val if r["phase"] == ph and (key in r)]
+            if va_x:
+                plt.plot(va_x, va_y, linestyle="--", marker="o", markersize=3.5, label=f"val-{ph}")
+                has_any = True
+
+        if not has_any:
+            plt.close(); continue
+
+        plt.title(f"{key} loss (train vs val)")
+        plt.xlabel("epoch")
+        plt.ylabel(key)
+        plt.grid(alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        fname = f"loss_{key}{'' if phase is None else '_'+phase}.png"
+        plt.savefig(os.path.join(out_dir, fname), dpi=dpi)
+        plt.close()
+
 def compute_losses_multi_batches(
     *,
     model,
@@ -310,7 +415,7 @@ def compute_losses_multi_batches(
     # -------- Align --------
     if pep_align:
         if "align" in batches:
-            b = batches["align"]
+            b = batches["align"][0]
             mhc      = b["mhc"].to(device)
             peptide  = b["peptide"].to(device)
             cdr3     = b["cdr3"].to(device)
@@ -323,7 +428,7 @@ def compute_losses_multi_batches(
 
     # -------- MP binding --------
     if "mp" in batches:
-        b = batches["mp"]
+        b = batches["mp"][0]
         mhc      = b["mhc"].to(device)
         peptide  = b["peptide"].to(device)
         esm_mhc = b.get("esm_mhc", None)
@@ -340,7 +445,7 @@ def compute_losses_multi_batches(
 
     # -------- PT binding --------
     if "pt" in batches:
-        b = batches["pt"]
+        b = batches["pt"][0]
         peptide = b["peptide"].to(device)
         cdr3    = b["cdr3"].to(device)
         y_pt    = b["y_pt"].to(device).view(-1, 1)
@@ -351,7 +456,7 @@ def compute_losses_multi_batches(
     # -------- MP contact --------
     if 'mp_contact' in batches:
         if phase in ("B", "C"):
-            b = batches["mp_contact"]
+            b = batches["mp_contact"][0]
             mhc      = b["mhc"].to(device)
             peptide  = b["peptide"].to(device)
             esm_mhc = b.get("esm_mhc", None)
@@ -376,7 +481,7 @@ def compute_losses_multi_batches(
     # -------- PT contact --------
     if 'pt_contact' in batches:
         if phase in ("B", "C"):
-            b = batches["pt_contact"]
+            b = batches["pt_contact"][0]
             peptide = b["peptide"].to(device)
             cdr3    = b["cdr3"].to(device)
 
@@ -399,7 +504,7 @@ def compute_losses_multi_batches(
     # -------- IMM --------
     if "imm" in batches:
         if phase == "C":
-            b = batches["imm"]
+            b = batches["imm"][0]
             mhc      = b["mhc"].to(device)
             peptide  = b["peptide"].to(device)
             esm_mhc = b.get("esm_mhc", None)
@@ -415,7 +520,7 @@ def compute_losses_multi_batches(
 
     # -------- MPT --------
     if "mpt" in batches:
-        b = batches["mpt"]
+        b = batches["mpt"][0]
         mhc      = b["mhc"].to(device)
         peptide  = b["peptide"].to(device)
         cdr3     = b["cdr3"].to(device)

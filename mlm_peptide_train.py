@@ -21,7 +21,7 @@ df_train = df.drop(df_valid.index)
 
 aa_dict = mk_aa_dict()
 lm_config = {
-    'max_len':10,'d_seq':128, 'd_pair':64,
+    'max_len':15,'d_seq':128, 'd_pair':64,
     'd_head':32, 'dropout':0.1, 'n_layers':6
 }
 
@@ -37,7 +37,7 @@ else:
     device = 'cpu'
 
 train_config = {
-    'masked_rate':0.15,'batch_size':256, 'contiguous_prob':0.5,
+    'masked_rate':0.15,'batch_size':256, 'contiguous_prob':0.3,
     'lr':5e-5, 'weight_decay':0.01, 'max_epoch':500, 
      'patience':50, 'save_path':'peptide_mlm.pt'
 }

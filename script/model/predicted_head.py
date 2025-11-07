@@ -117,7 +117,7 @@ class PredHead(nn.Module):
             feats.append(self.trbv_emb(trbv))                       # [B, 48]
 
         feat = torch.cat(feats, dim=-1)  # [B, in_dim]
-        prob = self.mlp(feat).squeeze(-1)           # [B]
+        prob = self.mlp(feat)          # [B,1]
         return prob
     
 class ContactPredHead(nn.Module):

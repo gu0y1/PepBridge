@@ -67,7 +67,7 @@ class Encoder(nn.Module):
     def forward(self, aa_seq, mask, esm_mhc=None):
         seq_repr, pair_repr = self.embedder(aa_seq, esm_mhc)
         seq_repr, pair_repr = self.pair_aware_trunk(seq_repr, pair_repr, mask)
-        return pair_repr, pair_repr
+        return seq_repr, pair_repr
 
 
 
