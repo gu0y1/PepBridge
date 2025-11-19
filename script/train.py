@@ -16,13 +16,40 @@ from .loss import contact_losses, bce_loss
 from .model.lora import build_model_with_lora
 
 task_every = {
-    "mp_contact": 20,  
-    "pt_contact": 20,  
+    "mp_contact": 80,  
+    "pt_contact": 80,  
 }
 
-def freeze_module(mod):
-    for p in mod.parameters():
-        p.requires_grad = False
+def rampup_weight(step, warmup=2000, ramp=3000):
+    if step < warmup: return 0.0
+    t = min(1., (step - warmup)/ramp)
+    return 0.5 - 0.5 * math.cos(math.pi * t)
+
+def linear_decay(step: int, total_steps: int, start: float = 1.0, end: float = 0.0):
+    if total_steps <= 0:
+        return end
+    progress = min(max(step, 0), total_steps) / total_steps
+    return start + (end - start) * progress
+
+def _to_set(x):
+    if isinstance(x, str):
+        return {x}
+    return set(x)
+
+def freeze_module(model, module_names, logger=None):
+    targets = _to_set(module_names)
+    for name, module in model.named_modules():
+        if name in targets:
+            msg = (f"Freezing module: {name}")
+            logger.info(msg) if logger is not None else print(msg)
+            for param in module.parameters():
+                param.requires_grad = False
+
+def set_eval_mode(model, module_names):
+    targets = _to_set(module_names)
+    for name, module in model.named_modules():
+        if name in targets: 
+            module.eval()
 
 def _infinite_iter(dl):
     it = iter(dl)
@@ -49,9 +76,12 @@ def train_three_phases_multi_loaders(
     val_loaders= None,
     eval_every_epochs=1,
     pep_align=True,
+    all_align=True,
     use_lora=True,
     last_n=2,
-    cfg_seq_pair=((8,16),(4,8))
+    cfg_seq_pair=((8,16),(4,8)),
+    logger=None,
+    use_logits=True
 ):
     """
     loaders key: value
@@ -68,26 +98,25 @@ def train_three_phases_multi_loaders(
 
     os.makedirs(save_dir, exist_ok=True)
     model = model.to(device)
-    scaler = GradScaler(enabled=amp, device=device)
+    scaler = GradScaler(enabled=amp)
 
     # lora
     if use_lora:
         model = build_model_with_lora(model, last_n, cfg_seq_pair, 
                                       dropout=0.1, freeze_base=True,
-                                      print_trainabel=True)
+                                      print_trainabel=False)
     else:
-        freeze_module(model.peptide_encoder)
-        freeze_module(model.cdr3_encoder)
+        freeze_module(model, ['peptide_encoder','cdr3_encoder'],logger)
 
     # λ
-    lambdas_A = dict(align=0.20, MP=1.00, PT=1.00, IMM=0.0, contact=0.0, MPT=0.0, lg=0.0)
-    lambdas_B = dict(align=0.15, MP=0.80, PT=0.80, IMM=0.0, contact=0.10, MPT=0.0, lg=0.0)
-    lambdas_C = dict(align=0.10, MP=0.50, PT=0.50, IMM=0.60, contact=0.10, MPT=0.60, lg=0.30)
+    lambdas_A = dict(align=0.20, MP=1.20, PT=1.00, IMM=0.0, contact=0.0, MPT=0.0, lg=0.0)
+    lambdas_B = dict(align=0.20, MP=1.00, PT=0.80, IMM=0.0, contact=0.04, MPT=0.0, lg=0.0)
+    lambdas_C = dict(align=0.00, MP=0.00, PT=0.00, IMM=1.00, contact=0.00, MPT=1.00, lg=0.00)
 
     phases = {
         "A": dict(lmb=lambdas_A, tasks=("align", "mp", "pt")),
         "B": dict(lmb=lambdas_B, tasks=("align", "mp", "pt", "mp_contact", "pt_contact")),
-        "C": dict(lmb=lambdas_C, tasks=("align", "mp", "pt", "mp_contact", "pt_contact", "imm", "mpt")),
+        "C": dict(lmb=lambdas_C, tasks=( "imm", "mpt")),
     }
     recorder = MetricsRecorder()
 
@@ -99,6 +128,16 @@ def train_three_phases_multi_loaders(
     optimizer = None
     for ph, cfg in phases.items():
         if new_optimizer_each_phase or optimizer is None:
+            optimizer = make_optimizer()
+        if ph == 'C':
+            freeze_module(model,['peptide_encoder', 'mhc_encoder','chain_id_embedder', 
+                                 'mhc_ln','pep_ln','cdr3_ln', 
+                                 'mp_joint_embedder', 'pt_joint_embedder',
+                                 'mp_pair_aware_trunk','pt_pair_aware_trunk',
+                                 'mp_pred_head','pt_pred_head','mp_contact_pred_head','pt_contact_pred_head',
+                                 'pep_seq_proj','pep_pair_proj'], 
+                                 logger)
+
             optimizer = make_optimizer()
 
         active = {k: loaders.get(k) for k in cfg["tasks"] if loaders.get(k) is not None}
@@ -127,8 +166,11 @@ def train_three_phases_multi_loaders(
             val_loaders=val_loaders,
             eval_every_epochs=eval_every_epochs,
             pep_align=pep_align,
+            all_align=all_align,
             use_lora=use_lora,
-            recorder=recorder
+            recorder=recorder,
+            logger=logger,
+            use_logits=use_logits
         )
 
     plot_losses(recorder, out_dir=save_dir, phase=None)
@@ -152,8 +194,11 @@ def _train_one_phase_multi(
     val_loaders=None,
     eval_every_epochs: int = 1,
     pep_align=True,
+    all_align=True,
     use_lora=True,
     recorder=None, 
+    logger=None,
+    use_logits=True
 ):
     def every_of(task: str) -> int:
         v = task_every.get(task, 1)
@@ -168,6 +213,13 @@ def _train_one_phase_multi(
         if use_lora is False:
             model.peptide_encoder.eval()
         model.cdr3_encoder.eval()
+        if phase_name =='C':
+            set_eval_mode(model,['peptide_encoder','mhc_encoder', 'chain_id_embedder', 
+                                 'mhc_ln','pep_ln','cdr3_ln', 
+                                 'mp_joint_embedder', 'pt_joint_embedder',
+                                 'mp_pair_aware_trunk','pt_pair_aware_trunk',
+                                 'mp_pred_head','pt_pred_head','mp_contact_pred_head','pt_contact_pred_head',
+                                 'pep_seq_proj','pep_pair_proj'])
 
         running_sum = defaultdict(float)
         running_cnt = defaultdict(int) 
@@ -178,15 +230,34 @@ def _train_one_phase_multi(
 
             batches = {name: next(iters[name]) for name in due_tasks}
 
-            with autocast(enabled=amp,device_type=device):
+            with autocast(enabled=amp):
                 # multi-dataloader loss
                 loss_parts = compute_losses_multi_batches(
                     model=model,
                     device=device,
                     phase=phase_name,
                     batches=batches,
-                    pep_align=pep_align
+                    pep_align=pep_align,
+                    all_align=all_align,
+                    use_logits=use_logits
                 )
+                if phase_name == 'A':
+                    w_align = rampup_weight(step=(epoch-1)*steps_per_epoch + step, 
+                                            warmup=0,ramp=5000)
+                    lambdas["align"] = w_align * 0.20
+                    
+                    w_pt = rampup_weight(step=(epoch-1)*steps_per_epoch + step, 
+                                            warmup=5000,ramp=5000)
+                    lambdas["PT"] = w_pt * 1.00
+                    
+                elif phase_name == 'B':
+                    lambdas["align"] = linear_decay(step=(epoch-1)*steps_per_epoch + step,
+                                                    total_steps=epochs*steps_per_epoch, 
+                                                    start=0.20, end=0.00)
+                                                    
+                    w_contact = rampup_weight(step=(epoch-1)*steps_per_epoch + step, 
+                                            warmup=0,ramp=3000)
+                    lambdas["contact"] = w_contact * 0.04
 
                 total = (
                     lambdas["align"]   * loss_parts["align"] +
@@ -225,7 +296,7 @@ def _train_one_phase_multi(
                        f"PT={avg('PT'):.4f} contact={avg('contact'):.4f} "
                        f"IMM={avg('IMM'):.4f} MPT={avg('MPT'):.4f} "
                        f"logic_imm={avg('logic_imm'):.4f} logic_mpt={avg('logic_mpt'):.4f}")
-                print(msg)
+                logger.info(msg) if logger is not None else print(msg)
 
                 if recorder is not None:
                     rec_point = {
@@ -253,9 +324,14 @@ def _train_one_phase_multi(
                 device=device,
                 phase_name=phase_name,
                 lambdas=lambdas,
-                pep_align=pep_align
+                max_steps=200,
+                pep_align=pep_align,
+                all_align=all_align,
+                use_logits=use_logits
             )
-            print(f"[Phase {phase_name}] epoch {epoch} VAL:", {k: f"{v:.4f}" for k, v in val_parts.items()}, f"total={val_total:.4f}")
+            parts = " ".join(f"{k}={v:.4f}" for k, v in val_parts.items())
+            msg = f"[Phase {phase_name}] epoch {epoch} VAL: {parts} | total={val_total:.4f}"
+            logger.info(msg) if logger is not None else print(msg)
             if recorder is not None:
                 recorder.log_val(phase=phase_name, epoch=epoch, val_parts=val_parts, val_total=val_total)
 
@@ -266,13 +342,15 @@ def _train_one_phase_multi(
                             "lambdas": lambdas,
                             "val_total": best_val,
                             "epoch": epoch}, save_path)
-                print(f"[Phase {phase_name}] ☆ improved, saved best full ckpt to {save_path}")
+                msg = f"[Phase {phase_name}] ☆ improved, saved best full ckpt to {save_path}"
+                logger.info(msg) if logger is not None else print(msg)
     # save
     if not os.path.isfile(save_path):
         torch.save({"model_state": model.state_dict(),
                     "phase": phase_name,
                     "lambdas": lambdas}, save_path)
-    print(f"[Phase {phase_name}] saved to {save_path}")
+        msg = f"[Phase {phase_name}] saved to {save_path}"
+        logger.info(msg) if logger is not None else print(msg)
 
 @torch.no_grad()
 def evaluate_phase_multi(
@@ -281,38 +359,65 @@ def evaluate_phase_multi(
     device: str,
     phase_name: str,
     lambdas: Dict[str, float],
-    max_batches=None, 
-    pep_align=True
+    max_steps=None, 
+    pep_align=True,
+    all_align=True,
+    use_logits=True
 ) -> Tuple[Dict[str, float], float]:
     if not val_loaders:
         zeros = {k: 0.0 for k in ["align","MP","PT","contact","IMM","MPT","logic_imm","logic_mpt"]}
         return zeros, 0.0
-
     model.eval()
-    sums = defaultdict(float)
-    cnts = defaultdict(int)
 
-    for task, dl in val_loaders.items():
+    phases_task = {
+        "A": ("align", "mp", "pt"), 
+        "B": ("align", "mp", "pt", "mp_contact", "pt_contact"),
+        "C": ("imm", "mpt")
+    }
+    active = {}
+    for k in phases_task[phase_name]:
+        dl = val_loaders.get(k, None)
         if dl is None:
             continue
-        seen = 0
-        for batch in dl:
-            batches = {task: batch}
-            parts = compute_losses_multi_batches(
-                model=model,
-                device=device,
-                phase=phase_name,
-                batches=batches,
-                pep_align=pep_align
-            )
-            for k, v in parts.items():
-                val = float(v.detach().item())
-                sums[k] += val
-                cnts[k] += 1
-            seen += 1
-            if (max_batches is not None) and (seen >= max_batches):
-                break
+        try:
+            if hasattr(dl, "__len__") and len(dl) == 0:
+                continue
+        except Exception:
+            pass
+        active[k] = dl
 
+    if len(active) == 0:
+        zeros = {k: 0.0 for k in ["align","MP","PT","contact","IMM","MPT","logic_imm","logic_mpt"]}
+        return zeros, 0.0
+    
+    if max_steps is None:
+        try:
+            max_steps = min(len(dl) for dl in active.values())
+            if max_steps is None or max_steps <= 0:
+                raise ValueError
+        except Exception:
+            max_steps = 200 
+            
+    iters = {k: _infinite_iter(dl) for k, dl in active.items()}
+
+    sums = defaultdict(float)
+    cnts = defaultdict(int)
+    for _ in range(max_steps):
+        batches = {name: next(iters[name]) for name in phases_task[phase_name]}
+
+        parts = compute_losses_multi_batches(
+            model=model,
+            device=device,
+            phase=phase_name,
+            batches=batches,
+            pep_align=pep_align,
+            all_align=all_align,
+            use_logits=use_logits
+        )
+        for k, v in parts.items():
+            val = float(v.detach().item())
+            sums[k] += val
+            cnts[k] += 1
     # mean
     means = {}
     for k in ["align","MP","PT","contact","IMM","MPT","logic_imm","logic_mpt"]:
@@ -357,7 +462,7 @@ class MetricsRecorder:
 def plot_losses(
     recorder: MetricsRecorder,
     out_dir: str,
-    phase: str | None = None,
+    phase: str,
     keys = ("total","align","MP","PT","contact","IMM","MPT","logic_imm","logic_mpt"),
     dpi: int = 200
 ):
@@ -406,14 +511,16 @@ def compute_losses_multi_batches(
     device,
     phase: str,
     batches: Dict[str, dict], 
-    pep_align=True 
+    pep_align=True,
+    all_align=True,
+    use_logits=True
 ) -> Dict[str, torch.Tensor]:
     zeros = torch.tensor(0.0, device=device)
     out = dict(align=zeros, MP=zeros, PT=zeros, contact=zeros, IMM=zeros, MPT=zeros, 
                logic_imm=zeros, logic_mpt=zeros)
 
     # -------- Align --------
-    if pep_align:
+    if (pep_align is True) and (phase in ('A', 'B')):
         if "align" in batches:
             b = batches["align"][0]
             mhc      = b["mhc"].to(device)
@@ -422,12 +529,12 @@ def compute_losses_multi_batches(
             esm_mhc = b.get("esm_mhc", None)
             if esm_mhc is not None: esm_mhc = esm_mhc.to(device)
 
-            out["align"] = model.pep_align(mhc, peptide, cdr3, esm_mhc)
+            out["align"] = model.pep_align(mhc, peptide, cdr3, esm_mhc,all_align=all_align)
     else:
         out["align"] = torch.tensor(0.0, device=device)
 
     # -------- MP binding --------
-    if "mp" in batches:
+    if ("mp" in batches) and (phase in ('A', 'B')):
         b = batches["mp"][0]
         mhc      = b["mhc"].to(device)
         peptide  = b["peptide"].to(device)
@@ -436,26 +543,26 @@ def compute_losses_multi_batches(
         y_mp     = b["y_mp"].to(device).view(-1, 1)
 
         mp_out = model.mp_pred(mhc, peptide, esm_mhc, contact=False, immunogenicity=(phase=="C"))
-        out["MP"] = bce_loss(mp_out["binding_prob"], y_mp)
+        out["MP"] = bce_loss(mp_out["binding_prob"], y_mp, use_logits=use_logits)
 
-        # L_logic_IMM
-        if phase=="C":
-            out["logic_imm"] = out["logic_imm"] + \
-                F.relu(mp_out["immunogenicity_prob"] - mp_out["binding_prob"]).mean() * 0.5
+        # # L_logic_IMM
+        # if phase=="C":
+        #     out["logic_imm"] = out["logic_imm"] + \
+        #         F.relu(mp_out["immunogenicity_prob"] - mp_out["binding_prob"]).mean() * 0.5
 
     # -------- PT binding --------
-    if "pt" in batches:
+    if ("pt" in batches) and (phase in ('A', 'B')):
         b = batches["pt"][0]
         peptide = b["peptide"].to(device)
         cdr3    = b["cdr3"].to(device)
         y_pt    = b["y_pt"].to(device).view(-1, 1)
 
         pt_out = model.pt_pred(peptide, cdr3, contact=False)
-        out["PT"] = bce_loss(pt_out["binding_prob"], y_pt)
+        out["PT"] = bce_loss(pt_out["binding_prob"], y_pt, use_logits=use_logits)
 
     # -------- MP contact --------
     if 'mp_contact' in batches:
-        if phase in ("B", "C"):
+        if phase == "B":
             b = batches["mp_contact"][0]
             mhc      = b["mhc"].to(device)
             peptide  = b["peptide"].to(device)
@@ -474,13 +581,14 @@ def compute_losses_multi_batches(
             lp, ld = contact_losses(
                 prob_pred=mp_out.get("contact_prob", None),
                 dist_pred=mp_out.get("contact_dist", None),
-                prob_tgt=p_bin, dist_tgt=p_dis, pair_mask=pair_mask
+                prob_tgt=p_bin, dist_tgt=p_dis, pair_mask=pair_mask,
+                use_logits=use_logits
             )
             out["contact"] = out["contact"] + lp + ld
             
     # -------- PT contact --------
     if 'pt_contact' in batches:
-        if phase in ("B", "C"):
+        if phase == "B":
             b = batches["pt_contact"][0]
             peptide = b["peptide"].to(device)
             cdr3    = b["cdr3"].to(device)
@@ -497,7 +605,8 @@ def compute_losses_multi_batches(
             lp, ld = contact_losses(
                 prob_pred=pt_out.get("contact_prob", None),
                 dist_pred=pt_out.get("contact_dist", None),
-                prob_tgt=p_bin, dist_tgt=p_dis, pair_mask=pair_mask
+                prob_tgt=p_bin, dist_tgt=p_dis, pair_mask=pair_mask,
+                use_logits=use_logits
             )
             out["contact"] = out["contact"] + lp + ld
 
@@ -512,28 +621,32 @@ def compute_losses_multi_batches(
             y_imm    = b["y_imm"].to(device).view(-1, 1)
 
             mp_out = model.mp_pred(mhc, peptide, esm_mhc, contact=False, immunogenicity=True)
-            out["IMM"] = bce_loss(mp_out["immunogenicity_prob"], y_imm)
+            out["IMM"] = bce_loss(mp_out["immunogenicity_prob"], y_imm, use_logits=use_logits)
 
             # L_logic_IMM
+            neg = (y_imm.expand_as(mp_out["immunogenicity_prob"]) == 0).float()
             out["logic_imm"] = out["logic_imm"] + \
-                F.relu(mp_out["immunogenicity_prob"] - mp_out["binding_prob"]).mean() * 0.5
+                (F.relu(mp_out["immunogenicity_prob"] - mp_out["binding_prob"] + 0.3) * neg).sum() / neg.sum().clamp_min(1e-8)
 
     # -------- MPT --------
     if "mpt" in batches:
-        b = batches["mpt"][0]
-        mhc      = b["mhc"].to(device)
-        peptide  = b["peptide"].to(device)
-        cdr3     = b["cdr3"].to(device)
-        esm_mhc = b.get("esm_mhc", None)
-        if esm_mhc is not None: esm_mhc = esm_mhc.to(device)
-        trbv     = b.get("trbv", None)
-        if trbv is not None: trbv = trbv.to(device)
-        y_mpt    = b["y_mpt"].to(device).view(-1, 1)
-
-        mpt_out = model.mpt_pred(mhc, peptide, cdr3, esm_mhc, trbv)
-        out["MPT"] = bce_loss(mpt_out["mpt_prob"], y_mpt)
-
-        # L_logic_MPT = ReLU(P_MPT - min(P_MP, P_PT))
-        min_mp_pt = torch.minimum(mpt_out["mp_prob"], mpt_out["pt_prob"])
-        out["logic_mpt"] = out["logic_mpt"] + F.relu(mpt_out["mpt_prob"] - min_mp_pt).mean()
+        if phase == "C":
+            b = batches["mpt"][0]
+            mhc      = b["mhc"].to(device)
+            peptide  = b["peptide"].to(device)
+            cdr3     = b["cdr3"].to(device)
+            esm_mhc = b.get("esm_mhc", None)
+            if esm_mhc is not None: esm_mhc = esm_mhc.to(device)
+            trbv     = b.get("trbv", None)
+            if trbv is not None: trbv = trbv.to(device)
+            y_mpt    = b["y_mpt"].to(device).view(-1, 1)
+    
+            mpt_out = model.mpt_pred(mhc, peptide, cdr3, esm_mhc, trbv)
+            out["MPT"] = bce_loss(mpt_out["mpt_prob"], y_mpt, use_logits=use_logits)
+    
+            # L_logic_MPT = ReLU(P_MPT - min(P_MP, P_PT))
+            min_mp_pt = torch.minimum(mpt_out["mp_prob"], mpt_out["pt_prob"])
+            neg = (y_mpt.expand_as(mpt_out["mpt_prob"]) == 0).float()
+            out["logic_mpt"] = out["logic_mpt"] + \
+                (F.relu(mpt_out["mpt_prob"] - min_mp_pt + 0.3) * neg).sum() / neg.sum().clamp_min(1e-8)
     return out

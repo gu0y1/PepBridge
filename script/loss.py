@@ -3,18 +3,48 @@ import torch.nn.functional as F
 
 from typing import Optional
 
-def mask_mean(x, mask=None):
-    if mask is None:
-        return x.mean()
+def vicreg(z_s, z_t, lmb=20.0, mu=25.0, nu=1.0, gamma=1.0, eps=1e-4):
+    # z_*: [N, d]
+    # 1) invariance
+    inv = F.mse_loss(z_s, z_t)
+
+    # 2) variance (per feature)
+    def _var(z):
+        z = z - z.mean(dim=0, keepdim=True)
+        std = torch.sqrt(z.var(dim=0, unbiased=False) + eps)
+        return torch.mean(F.relu(gamma - std))
+    var = _var(z_s) + _var(z_t)
+
+    # 3) covariance (off-diagonal)
+    def _cov(z):
+        z = z - z.mean(dim=0, keepdim=True)
+        N = z.size(0)
+        c = (z.T @ z) / (N - 1)
+        off = c - torch.diag(torch.diag(c))
+        return (off ** 2).sum() / z.size(1)
+    cov = _cov(z_s) + _cov(z_t)
+
+    return (lmb * inv + mu * var + nu * cov) / (lmb + mu + nu)
+
+def _batch_masked_mean(x, mask, w=None, dims=(1,2), eps=1e-8):
+    # x, mask: [B, L1, L2]
+    if w is None:
+        w = 1.0
     valid = mask.to(dtype=x.dtype)
-    s = (x * valid).sum()
-    n = valid.sum()
-    if n.item() == 0:
-        return x.new_zeros(())
-    return s / n
+    num = (w * x * valid).sum(dim=dims)
+    den = (w * valid).sum(dim=dims).clamp_min(eps)
+    per_ex = num / den                # [B]
+    return per_ex.mean()              # scalar
+
+@torch.no_grad()
+def _pos_weight_from_mask(y, mask, eps=1e-8):
+    yb = (y > 0.5) & mask
+    pos = yb.sum(dim=(1,2)).float()            # [B]
+    neg = (mask.sum(dim=(1,2)) - yb.sum(dim=(1,2))).float() # [B]
+    return (neg + eps) / (pos + eps)  # [B]
 
 def contact_losses(prob_pred, dist_pred, prob_tgt,
-                   dist_tgt, pair_mask, use_logits=False):
+                   dist_tgt, pair_mask, use_logits=True):
     # squeeze（if [..., 1]）
     if prob_pred.dim() == 4 and prob_pred.size(-1) == 1:
         prob_pred = prob_pred.squeeze(-1)
@@ -31,19 +61,24 @@ def contact_losses(prob_pred, dist_pred, prob_tgt,
     if prob_tgt is not None:
         ce = F.binary_cross_entropy_with_logits(prob_pred, prob_tgt, reduction="none") \
              if use_logits else F.binary_cross_entropy(prob_pred, prob_tgt, reduction="none")
-        loss_prob = mask_mean(ce, pair_mask)
+        pw = _pos_weight_from_mask(prob_tgt, pair_mask).clamp_(1.0, 30.0).to(ce.dtype).view(-1, 1, 1)
+        posmask = ((prob_tgt > 0.5) & pair_mask).to(ce.dtype) 
+        w = 1.0 + (pw - 1.0) * posmask
+        loss_prob = _batch_masked_mean(ce, pair_mask, w)
 
     if (dist_pred is not None) and (dist_tgt is not None):
         mse = F.mse_loss(dist_pred, dist_tgt, reduction="none")
-        loss_dist = mask_mean(mse, pair_mask)
+        # hub = F.smooth_l1_loss(dist_pred, dist_tgt, reduction='none', beta=1.0)
+        loss_dist = _batch_masked_mean(mse, pair_mask)
 
     return loss_prob, loss_dist
-
-def bce_loss(pred, target, use_logits=False, reduction="mean"):
+  
+def bce_loss(pred, target, use_logits=True, reduction="mean"):
     if use_logits:
-        return F.binary_cross_entropy_with_logits(pred, target, reduction=reduction)
+        loss_heads = F.binary_cross_entropy_with_logits(pred, target.expand_as(pred), reduction=reduction)
     else:
-        return F.binary_cross_entropy(pred, target, reduction=reduction)
+        loss_heads = F.binary_cross_entropy(pred, target.expand_as(pred), reduction=reduction)
+    return loss_heads
 
 def loss_pair_pseudolikelihood(
     seq_logits,              # [B, L, A]  -> h_i(a)

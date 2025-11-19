@@ -1,27 +1,178 @@
 from scipy.stats import pearsonr, spearmanr
-from sklearn.metrics import roc_auc_score, average_precision_score, \
-    accuracy_score, f1_score, precision_score, recall_score, mean_squared_error
+from sklearn.metrics import roc_auc_score, precision_recall_curve, auc, \
+    accuracy_score, f1_score, precision_score, recall_score, \
+    mean_squared_error, matthews_corrcoef, mean_absolute_percentage_error
+
+import numpy as np
 
 import torch.nn.functional as F
 import torch
 
-def evaluate_metrics(y_true, y_prob, task):
-    y_pred = [int(p > 0.5) for p in y_prob] 
-    if task == 'BCE':
-        return {
-            'AUC': roc_auc_score(y_true, y_prob),
-            'PR-AUC': average_precision_score(y_true, y_prob),
-            "Accuracy": accuracy_score(y_true, y_pred),
-            "Precision": precision_score(y_true, y_pred),
-            "Recall": recall_score(y_true, y_pred),
-            "F1": f1_score(y_true, y_pred)
-        }
-    elif task == 'MSE':
-        return {
-            'RMSE': mean_squared_error(y_true, y_prob, squared=False),
-            'Pearson': pearsonr(y_true, y_prob)[0],
-            'Spearman': spearmanr(y_true, y_prob)[0]
-        }
+def _round_metrics_dict(d, ndigits=4):
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, (float, np.floating)):
+            out[k] = float(np.round(v, ndigits))
+        else:
+            out[k] = v
+    return out
+
+
+def _binary_metrics_on_flat(y_true_flat, y_pred_flat, threshold=0.5):
+    if y_true_flat.size == 0:
+        raise ValueError("none samples")
+
+    y_pred_label = (y_pred_flat > threshold).astype(int)
+
+    unique_labels = np.unique(y_true_flat)
+    if unique_labels.size < 2:
+        auc_roc = np.nan
+        aupr_val = np.nan
+        precision_curve = np.array([1.0])
+        recall_curve = np.array([0.0])
+    else:
+        precision_curve, recall_curve, _ = precision_recall_curve(
+            y_true_flat, y_pred_flat
+        )
+        auc_roc = roc_auc_score(y_true_flat, y_pred_flat)
+        aupr_val = auc(recall_curve, precision_curve)
+
+    if np.unique(y_pred_label).size < 2:
+        mcc_val = np.nan
+    else:
+        mcc_val = matthews_corrcoef(y_true_flat, y_pred_label)
+    metrics = {
+        'AUC': auc_roc,
+        'AUPR': aupr_val,
+        'MCC': mcc_val,
+        "Accuracy": accuracy_score(y_true_flat, y_pred_label),
+        "Precision": precision_score(y_true_flat, y_pred_label, zero_division=0),
+        "Recall": recall_score(y_true_flat, y_pred_label, zero_division=0),
+        "F1": f1_score(y_true_flat, y_pred_label, zero_division=0)
+    }
+    return _round_metrics_dict(metrics, ndigits=4)
+
+
+def binary_evaluate_metrics(y_true, y_pred, mask=None, threshold=0.5, group=None, mean=False):
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    if y_true.shape != y_pred.shape:
+        if (y_pred.ndim == y_true.ndim + 1 and
+            y_pred.shape[-1] == 1 and
+            y_pred.shape[:-1] == y_true.shape):
+            y_pred = np.squeeze(y_pred, axis=-1)
+        elif (y_true.ndim == y_pred.ndim + 1 and
+              y_true.shape[-1] == 1 and
+              y_true.shape[:-1] == y_pred.shape):
+            y_true = np.squeeze(y_true, axis=-1)
+        else:
+            raise ValueError(
+                f"y_true.shape={y_true.shape}, y_pred.shape={y_pred.shape}"
+            )
+
+    if mask is not None:
+        mask = np.asarray(mask).astype(bool)
+        if mask.shape != y_true.shape:
+            raise ValueError(
+                f"mask.shape={mask.shape} y_true.shape={y_true.shape}"
+            )
+        y_true_flat = y_true[mask]
+        y_pred_flat = y_pred[mask]
+    else:
+        y_true_flat = y_true.ravel()
+        y_pred_flat = y_pred.ravel()
+
+    if y_true_flat.size == 0:
+        raise ValueError("none samples")
+
+    if group is None:
+        return _binary_metrics_on_flat(y_true_flat, y_pred_flat, threshold)
+
+    group = np.asarray(group)
+    if group.shape != y_true.shape:
+        raise ValueError(
+            f"group.shape={group.shape} y_true.shape={y_true.shape}"
+        )
+    group_flat = group[mask] if mask is not None else group.ravel()
+
+    unique_groups = np.unique(group_flat)
+
+    group_to_metrics = {}
+    for g in unique_groups:
+        idx = (group_flat == g)
+        y_true_g = y_true_flat[idx]
+        y_pred_g = y_pred_flat[idx]
+
+        if y_true_g.size == 0:
+            continue
+
+        group_to_metrics[g] = _binary_metrics_on_flat(
+            y_true_g, y_pred_g, threshold
+        )
+
+    all_metric_names = next(iter(group_to_metrics.values())).keys()
+    metrics_by_group = {m: {} for m in all_metric_names}
+
+    for g, m_dict in group_to_metrics.items():
+        for m_name, m_val in m_dict.items():
+            metrics_by_group[m_name][g] = m_val
+    if not mean:
+        return metrics_by_group
+
+    mean_metrics = {}
+    for m_name, g2v in metrics_by_group.items():
+        vals = np.array(list(g2v.values()), dtype=float)
+        mean_metrics[m_name] = float(np.nanmean(vals))
+
+    return _round_metrics_dict(mean_metrics, ndigits=4)
+
+def distance_evaluate_metrics(y_true, y_pred, mask, eps=1e-8):
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    mask   = np.asarray(mask).astype(bool)
+
+    assert y_true.shape == y_pred.shape == mask.shape
+    N = y_true.shape[0]
+
+    mse_list = np.zeros(N)
+    mape_list = np.zeros(N)
+    pear_list = np.zeros(N)
+    spea_list = np.zeros(N)
+
+    for i in range(N):
+        m = mask[i]
+        if not np.any(m):
+            mse_list[i]  = np.nan
+            mape_list[i] = np.nan
+            pear_list[i] = np.nan
+            spea_list[i] = np.nan
+            continue
+
+        yt = y_true[i][m]
+        yp = y_pred[i][m]
+
+        diff = yp - yt
+        mse  = np.mean(diff ** 2)
+        mape = np.mean(np.abs(diff) / (np.abs(yt) + eps))
+
+        mse_list[i]  = mse
+        mape_list[i] = mape
+
+        if yt.size < 2:
+            pear_list[i] = np.nan
+            spea_list[i] = np.nan
+        else:
+            pear_list[i] = pearsonr(yt, yp)[0]
+            spea_list[i] = spearmanr(yt, yp)[0]
+
+    metrics = {
+        "MSE":      np.nanmean(mse_list),
+        "MAPE":     np.nanmean(mape_list),
+        "Pearson":  np.nanmean(pear_list),
+        "Spearman": np.nanmean(spea_list),
+    }
+    return _round_metrics_dict(metrics, ndigits=4)
 
 def bertscore(seq_emb, cand_emb, ref_mask, cand_mask):
     """

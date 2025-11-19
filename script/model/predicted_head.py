@@ -3,21 +3,14 @@ import torch.nn as nn
 
 class PredHead(nn.Module):
     def __init__(self, d_seq, d_pair, dropout, near_band=4, 
-                 trbv_size=None, use_ln=True, gate=True):
+                 trbv_size=None, use_ln=True):
         super().__init__()
-
+        assert d_seq == d_pair * 2
         self.ln_s = nn.LayerNorm(d_seq)  if use_ln else nn.Identity()
-        self.ln_z = nn.LayerNorm(d_pair) if use_ln else nn.Identity()
+        self.ln_z = nn.LayerNorm(d_seq) if use_ln else nn.Identity()
         self.linear_seq = nn.Linear(d_seq, d_seq, bias=False)
-        self.linear_pair = nn.Linear(d_pair, d_pair, bias=False)
+        self.linear_pair = nn.Linear(d_seq, d_seq, bias=False)
 
-        self.gate = gate
-        if gate:
-            self.g_s_proj = nn.Linear(d_seq * 2, d_seq)
-            self.g_z_proj  = nn.Linear(d_pair * 2, d_pair)
-            nn.init.zeros_(self.g_s_proj.weight); torch.nn.init.ones_(self.g_s_proj.bias)
-            nn.init.zeros_(self.g_z_proj.weight); torch.nn.init.ones_(self.g_z_proj.bias)
-            
         self.near_band = int(near_band)
 
         self.trbv_emb = None
@@ -28,13 +21,20 @@ class PredHead(nn.Module):
                                          embedding_dim=trbv_dim, 
                                          padding_idx=0)
             
-        in_dim = d_seq + d_pair * 2 + trbv_dim
-        self.mlp = nn.Sequential(
-            nn.Linear(in_dim, 64),
+        in_dim = d_seq * 2 + trbv_dim
+        self.mlp0 = nn.Sequential(nn.Linear(in_dim, 64),
+            nn.ReLU(), nn.Dropout(dropout), nn.Linear(64, 1),
+        )
+        self.mlp1 = nn.Sequential(nn.Linear(in_dim, 64),
+            nn.ReLU(), nn.Dropout(dropout), nn.Linear(64, 1),
+        )
+        self.mlp2 = nn.Sequential(nn.Linear(in_dim, 64),
+            nn.ReLU(), nn.Dropout(dropout), nn.Linear(64, 1),
+        )
+        self.fusion = nn.Sequential(
+            nn.Linear(3, 8),
             nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(64, 1),
-            nn.Sigmoid()
+            nn.Linear(8, 1)
         )
         
     @staticmethod
@@ -71,17 +71,15 @@ class PredHead(nn.Module):
         else:
             s_mean = seq_repr.mean(dim=1)
             s_max  = seq_repr.amax(dim=1)
-        if self.gate:
-            gate_s = torch.sigmoid(self.g_s_proj(torch.cat([s_max, s_mean],dim=-1)))
-            s_feat = s_mean + gate_s * (s_max - s_mean)   # [B, d_seq]
-        else:
-            s_feat = 0.5 * (s_mean+s_max)
+        s_feat = torch.cat([s_mean, s_max],-1)
 
         # pair_repr
-        pair_repr = 0.5 * (pair_repr + pair_repr.transpose(1, 2))
+        pair_repr = torch.cat([pair_repr, 
+                               pair_repr.transpose(1, 2)],
+                               dim=-1)
         eye = torch.eye(L, device=device, dtype=pair_repr.dtype).view(1, L, L, 1)
         pair_repr = pair_repr * (1.0 - eye)
-        pair_repr = self.linear_pair(self.ln_z(pair_repr))                     # [B, L, L, d_pair]
+        pair_repr = self.linear_pair(self.ln_z(pair_repr))                     # [B, L, L, d_seq]
 
         if mask is not None:
             pair_mask = (mask.unsqueeze(2) & mask.unsqueeze(1)).unsqueeze(-1).float()  # [B,L,L,1]
@@ -93,33 +91,52 @@ class PredHead(nn.Module):
         inter_mask = pair_mask * (~same_chain).float()
 
         # inter
-        inter_mean = self._masked_mean(pair_repr, inter_mask, dim=(1, 2))   # [B, d_pair]
-        row_den = inter_mask.sum(dim=2).clamp_min(1e-6)         # [B, L, 1]
-        row_mean_i = (pair_repr * inter_mask).sum(dim=2) / row_den     # [B, L, d_pair]
-        inter_peak = row_mean_i.max(dim=1).values                  # [B, d_pair]B, d_pair]
+        inter_mean = self._masked_mean(pair_repr, inter_mask, dim=(1, 2))   # [B, d_seq]
 
-        if self.gate:
-            gate_z = torch.sigmoid(self.g_z_proj(torch.cat([inter_peak, inter_mean],dim=-1)))
-            inter_feat = inter_mean + gate_z * (inter_peak - inter_mean)
-        else:
-            inter_feat = 0.5 * (inter_mean+inter_peak)
+        row_den_raw = inter_mask.sum(dim=2)                                  # [B,L,1]
+        row_valid   = (row_den_raw.squeeze(-1) > 0)                          # [B,L]
+        row_den     = row_den_raw.clamp_min(1e-6)
+        row_mean_i  = (pair_repr * inter_mask).sum(dim=2) / row_den          # [B,L,d_seq]
+
+        neg_big = -1e4 if row_mean_i.dtype in (torch.float16, torch.bfloat16) else -1e9
+        score = row_mean_i.norm(p=2, dim=-1).masked_fill(~row_valid, neg_big)  # [B,L]
+        k_base = 3 if self.trbv_emb is None else 5
+        valid_counts = row_valid.sum(dim=1)
+        k_use = int(torch.clamp(valid_counts.min(), min=1).item())
+        k = min(k_base, k_use)
+
+        topk_idx = score.topk(k=k, dim=1).indices
+        selected = row_mean_i.gather(1, topk_idx.unsqueeze(-1).expand(-1, -1, row_mean_i.size(-1)))
+        inter_peak = selected.mean(dim=1)                                   
+
+        inter_feat =  torch.cat([inter_mean, inter_peak],dim=-1) # [B, d_seq*2]
 
         # intra
         idx  = torch.arange(L, device=device)
-        band = (idx[None, :, None] - idx[None, None, :]).abs() <= self.near_band
+        diff = (idx[None, :, None] - idx[None, None, :]).abs()  # [L, L]
+        band = (diff <= self.near_band) & (diff > 0)       
         band = band.view(1, L, L, 1).float()
         intra_near_mask = intra_mask * band
-        intra_compact = self._masked_mean(pair_repr, intra_near_mask, dim=(1, 2))  # [B, d_pair]
+        intra_compact = self._masked_mean(pair_repr, intra_near_mask, dim=(1, 2))  # [B, d_seq]
 
-        feats = [s_feat, inter_feat, intra_compact]
+        intra_max = self._masked_max(pair_repr, intra_near_mask, dim=(1, 2)) # [B, d_seq]
+        intra_feat =  torch.cat([intra_compact, intra_max], dim=-1) # [B, d_seq *2]
+
+        feats = torch.cat([s_feat.unsqueeze(1), 
+                           inter_feat.unsqueeze(1), 
+                           intra_feat.unsqueeze(1)],
+                          dim=1)  # [B, 3, d_seq]
         if self.trbv_emb is not None and trbv is not None:
             trbv = trbv.squeeze(-1) if trbv.dim() > 1 else trbv     # [B]
-            feats.append(self.trbv_emb(trbv))                       # [B, 48]
+            bv_emb = self.trbv_emb(trbv).unsqueeze(1).repeat(1,3,1)                      # [B, 3, 48]
+            feats = torch.cat([feats, bv_emb], dim=-1)  # [B, 3, in_dim]
 
-        feat = torch.cat(feats, dim=-1)  # [B, in_dim]
-        prob = self.mlp(feat)          # [B,1]
-        return prob
-    
+        logits = torch.cat([self.mlp0(feats[:,0,:]),
+                    self.mlp1(feats[:,1,:]),
+                    self.mlp2(feats[:,2,:])], dim=1)   # [B,3]    
+          
+        return self.fusion(logits)
+      
 class ContactPredHead(nn.Module):
     def __init__(self, d_pair, dropout, use_ln=True, gate=True):
         super().__init__()
@@ -152,7 +169,8 @@ class ContactPredHead(nn.Module):
             feat = feat + pair_repr
 
         out = self.mlp(feat)    
-        prob = torch.sigmoid(out[:,:,:,0])
+        #prob = torch.sigmoid(out[:,:,:,0])
+        logits = out[:,:,:,0]
         dist = torch.relu(out[:,:,:,1])
-        return prob, dist
+        return logits, dist
 

@@ -21,7 +21,7 @@ class RelativePositionEmbedding(nn.Module):
     def forward(
         self,
         residue_index: torch.Tensor,      # [B, L]
-        chain_id: torch.Tensor | None = None,  # [B, L]
+        chain_id=None,  # [B, L]
     ) -> torch.Tensor:
         """
         return: relpos_embed  [B, L, L, d_pair]

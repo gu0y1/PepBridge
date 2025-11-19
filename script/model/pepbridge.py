@@ -7,11 +7,25 @@ from .pair_aware_block import PairAwareTrunk
 from .encoder import Encoder
 from .joint_embedder import JointEmbedder
 from .predicted_head import PredHead, ContactPredHead
+from ..loss import vicreg
 
 HeadType = Union[torch.nn.Module, Callable[..., torch.Tensor]]
 
 ## max_len{mhc:34, peptide:15, cdr3:20}
 ## pair_aware_trunk n_layers 3 6 6 3 3 1
+
+class SharedProj(nn.Module):
+    def __init__(self, d, r=2):
+        super().__init__()
+        self.ln = nn.LayerNorm(d)
+        self.mlp = nn.Sequential(
+            nn.Linear(d, r*d, bias=False),
+            nn.GELU(),
+            nn.Linear(r*d, d, bias=False),
+        )
+        nn.init.zeros_(self.mlp[-1].weight)   # 使 y ≈ x 起步更稳
+    def forward(self, x):
+        return x + self.mlp(self.ln(x))       # 残差校准
 
 class PepBridge(nn.Module):
     def __init__(self, aa_size, max_len_dict, d_seq, d_head_seq, 
@@ -60,6 +74,10 @@ class PepBridge(nn.Module):
 
         self.mp_contact_pred_head = ContactPredHead(d_pair, dropout)
         self.pt_contact_pred_head = ContactPredHead(d_pair, dropout)
+        
+        #projector
+        self.pep_seq_proj = SharedProj(d_seq)
+        self.pep_pair_proj = SharedProj(d_pair)
     
     @staticmethod
     def _tokens_to_mask(x: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
@@ -244,7 +262,7 @@ class PepBridge(nn.Module):
                 mask_a=mask_dict['mhc'], mask_b=mask_dict['pep'],
                 pred_head=self.imm_pred_head, task='binding'
             )
-            output['immunogenicity_prob'] = imm_prob
+            output['immunogenicity_prob'] = binding_prob - F.softplus(imm_prob)
 
         if repr_out:
             output['seq_repr'], output['pair_repr'] = mp_seq, mp_pair
@@ -297,42 +315,101 @@ class PepBridge(nn.Module):
         chain_id = torch.cat([mp_out['chain_id_dict']['mhc'], mp_out['chain_id_dict']['pep'], pt_out['chain_id_dict']['cdr3']], dim=-1)
         mask = torch.cat([mp_out['mask_dict']['mhc'], mp_out['mask_dict']['pep'], pt_out['mask_dict']['cdr3']], dim=-1).bool()
 
-        mpt_prob = self.mpt_pred_head(seq, pair, chain_id, mask, trbv)
+        mpt_logit = self.mpt_pred_head(seq, pair, chain_id, mask, trbv)
+        min_logit = torch.minimum(mp_out['binding_prob'], pt_out['binding_prob'])
+        mpt_prob = min_logit - F.softplus(mpt_logit) 
         return {
             'mpt_prob': mpt_prob,
             'mp_prob': mp_out['binding_prob'],
             'pt_prob': pt_out['binding_prob'],
         }
     
-    def pep_align(self, mhc, peptide, cdr3, esm_mhc):
+    def pep_align(self, mhc, peptide, cdr3, esm_mhc, all_align=-1):
         """Alignment of peptide representation"""
-        repr_dict, mask_dict, _ = self.aa_seq_encode(mhc=mhc, peptide=peptide, cdr3=cdr3, esm_mhc=esm_mhc)
+        repr_dict, mask_dict, _ = self.aa_seq_encode(
+            mhc=mhc, peptide=peptide, cdr3=cdr3, esm_mhc=esm_mhc
+        )
 
-        mp_seq, mp_pair = self.mp_repr_encode(
-            repr_dict['mhc_seq'], repr_dict['mhc_pair'],
+        # MP trunk
+        mp_seq, mp_pair = self.mp_joint_embedder(
+            repr_dict['mhc_seq'], repr_dict['mhc_pair'], 
             repr_dict['pep_seq'], repr_dict['pep_pair'],
             mask_dict['mhc'], mask_dict['pep']
         )
-        pt_seq, pt_pair = self.pt_repr_encode(
+        mp_mask = torch.cat([mask_dict['mhc'], mask_dict['pep']], dim=1).bool()
+        _, _, mp_seq_list, mp_pair_list = self.mp_pair_aware_trunk(
+            mp_seq, mp_pair, mp_mask, return_hidden=True
+        )
+
+        # PT trunk
+        pt_seq, pt_pair = self.pt_joint_embedder(
             repr_dict['pep_seq'], repr_dict['pep_pair'],
             repr_dict['cdr3_seq'], repr_dict['cdr3_pair'],
             mask_dict['pep'], mask_dict['cdr3']
         )
+        pt_mask = torch.cat([mask_dict['pep'], mask_dict['cdr3']], dim=1).bool()
+        _, _, pt_seq_list, pt_pair_list = self.pt_pair_aware_trunk(
+            pt_seq, pt_pair, pt_mask, return_hidden=True
+        )
 
-        pep_seq_mp  = mp_seq[:, self.mhc_len:self.mhc_len+self.pep_len, :]
-        pep_pair_mp = mp_pair[:, self.mhc_len:self.mhc_len+self.pep_len, self.mhc_len:self.mhc_len+self.pep_len, :]
+        pep_mask = mask_dict['pep'].bool()              # [B, Lp]
+        pair_mask = pep_mask[:, :, None] & pep_mask[:, None, :]  # [B, Lp, Lp]
 
-        pep_seq_pt  = pt_seq[:, :self.pep_len, :]
-        pep_pair_pt = pt_pair[:, :self.pep_len, :self.pep_len, :]
+        token_mask_flat = pep_mask.view(-1)             # [B*Lp]
+        pair_mask_flat  = pair_mask.view(-1)            # [B*Lp*Lp]
 
-        pep_mask = mask_dict['pep'].bool()                     # [B, Lp]
-        seq_align_loss = F.mse_loss(pep_seq_mp[pep_mask], pep_seq_pt[pep_mask], reduction='mean')
+        align_loss = None
+        count = 0.0
+        
+        n_layers = len(mp_seq_list)
+        k = abs(int(all_align)) if all_align is not None else 1
+        if k == 0:
+            k = 1
+        if k >= n_layers:
+            layer_indices = range(n_layers)              
+        else:
+            layer_indices = range(n_layers - k, n_layers)
 
-        pair_mask = (pep_mask.unsqueeze(2) & pep_mask.unsqueeze(1))  # [B, Lp, Lp]
-        pair_align_loss = F.mse_loss(pep_pair_mp[pair_mask], pep_pair_pt[pair_mask], reduction='mean')
+        for i in layer_indices:
+            pep_seq_mp  = mp_seq_list[i][:, self.mhc_len:self.mhc_len+self.pep_len, :]
+            pep_pair_mp = mp_pair_list[i][:, self.mhc_len:self.mhc_len+self.pep_len,
+                                            self.mhc_len:self.mhc_len+self.pep_len, :]
+            with torch.no_grad():
+                pep_seq_mp  = self.pep_seq_proj(pep_seq_mp)
+                pep_pair_mp = self.pep_pair_proj(pep_pair_mp)
 
-        return (seq_align_loss + pair_align_loss) * 0.5
-    
+            pep_seq_pt  = pt_seq_list[i][:, :self.pep_len, :]
+            pep_pair_pt = pt_pair_list[i][:, :self.pep_len, :self.pep_len, :]
+            pep_seq_pt  = self.pep_seq_proj(pep_seq_pt)
+            pep_pair_pt = self.pep_pair_proj(pep_pair_pt)
+
+            x_mp = pep_seq_mp.view(-1, pep_seq_mp.size(-1))[token_mask_flat]  # [N_tok, D]
+            x_pt = pep_seq_pt.view(-1, pep_seq_pt.size(-1))[token_mask_flat]  # [N_tok, D]
+
+            if x_mp.size(0) < 2:
+                continue
+
+            seq_align_loss = vicreg(x_mp, x_pt)
+
+            if pair_mask_flat.any():
+                y_mp = pep_pair_mp.view(-1, pep_pair_mp.size(-1))[pair_mask_flat]  # [N_pair, Dp]
+                y_pt = pep_pair_pt.view(-1, pep_pair_pt.size(-1))[pair_mask_flat]
+                pair_align_loss = F.mse_loss(y_mp, y_pt)
+            else:
+                pair_align_loss = x_mp.new_zeros([])
+
+            cur_loss = 0.5 * (seq_align_loss + pair_align_loss)
+            if align_loss is None:
+                align_loss = cur_loss
+            else:
+                align_loss = align_loss + cur_loss
+            count += 1.0
+        if align_loss is None or count == 0:
+            return torch.zeros([], device=pep_seq_pt.device, dtype=pep_seq_pt.dtype)
+
+        align_loss = align_loss / count
+        return align_loss
+      
     def forward(self, mhc, peptide, cdr3, esm_mhc, trbv):
         mp_out = self.mp_pred(mhc, peptide, esm_mhc, contact=True, immunogenicity=True, repr_out=True)
         pt_out = self.pt_pred(peptide, cdr3, contact=True, repr_out=True)

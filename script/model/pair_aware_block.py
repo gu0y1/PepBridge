@@ -217,7 +217,7 @@ class TriangleMultiplicativeUpdate(nn.Module):
         b = mask * self.sigmoid(self.linear_b_g(z)) * self.linear_b_p(z)
 
         if(is_fp16_enabled()):
-            with autocast(enabled=False):
+            with autocast('cuda',enabled=False):
                 x = self._combine_projections(a.float(), b.float(), self._outgoing)
         else:
             x = self._combine_projections(a, b, self._outgoing)
@@ -315,7 +315,7 @@ class PairAwareBlock(nn.Module):
         self.seq_to_pair = SeqToPair(d_seq, d_pair)
 
         self.seq_attn = SelfAttention(d_seq, num_heads_seq, d_head_seq, 
-                                      inf=1e9, gate=True)
+                                      inf=1e4, gate=True)
         
         self.tri_mul_out = TriangleMultiplicativeUpdate(d_pair, d_pair, 
                                                         _outgoing=True)
@@ -323,9 +323,9 @@ class PairAwareBlock(nn.Module):
                                                         _outgoing=False)
         
         self.tri_attn_start = TriangleAttention(d_pair, num_heads_pair, d_head_pair, 
-                                                starting=True, inf=1e9, gate=True)  
+                                                starting=True, inf=1e4, gate=True)  
         self.tri_attn_end = TriangleAttention(d_pair, num_heads_pair, d_head_pair, 
-                                              starting=False, inf=1e9, gate=True)
+                                              starting=False, inf=1e4, gate=True)
         
         self.trans_seq = Transition(d_seq, 4, dropout)
         self.trans_pair = Transition(d_pair, 4, dropout)
@@ -400,7 +400,15 @@ class PairAwareTrunk(nn.Module):
             PairAwareBlock(d_seq, d_head_seq, d_pair, d_head_pair, dropout) for _ in range(n_layers)
         ])
 
-    def forward(self, seq_repr, pair_repr, mask):
+    def forward(self, seq_repr, pair_repr, mask, return_hidden=False):
+        seq_list=[]
+        pair_list=[]
         for _, pair_aware_layer in enumerate(self.pair_aware_trunk):
             seq_repr, pair_repr = pair_aware_layer(seq_repr, pair_repr, mask)
-        return seq_repr, pair_repr
+            if return_hidden:
+                seq_list.append(seq_repr)
+                pair_list.append(pair_repr)
+        if return_hidden:
+            return seq_repr, pair_repr, seq_list, pair_list
+        else:
+            return seq_repr, pair_repr

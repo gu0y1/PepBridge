@@ -12,6 +12,29 @@ from .model.pepbridge import PepBridge
 import csv
 import pandas as pd
 
+import logging
+import sys
+import random
+
+def setup_logger(logfile=None):
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    logger.handlers = []  
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter('[%(asctime)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+
+    if logfile:
+        file_handler = logging.FileHandler(logfile, mode='a')
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(console_formatter)
+        logger.addHandler(file_handler)
+
+    return logger
+
 def unwrap_sd(obj):
     sd = obj.get("state_dict", obj) if isinstance(obj, dict) else obj
     out = OrderedDict()
@@ -72,7 +95,7 @@ def model_fn(aa_vocab_size=26, trbv_vocab_size=78):
     return model
 
 def _make_folds(n_samples: int, n_splits: int, shuffle: bool, seed: int,
-                y: Optional[np.ndarray]) -> list[tuple[np.ndarray, np.ndarray]]:
+                y: Optional[np.ndarray]):
     """返回 [(train_idx, val_idx), ...]；若给 y 则分层。"""
     idx = np.arange(n_samples)
     try:

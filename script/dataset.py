@@ -54,6 +54,8 @@ class MPDataSet(Dataset):
     self.pseudo_mhc_dict = load_mhc_dict(mhc_type, pseudo=True)
     self.esm_mhc_dict = load_mhc_dict(mhc_type, pseudo=False)
     
+    self.shape = mp_df.shape
+    
   def __len__(self):
     return len(self.df)
   
@@ -133,7 +135,9 @@ class PTDataSet(Dataset):
 
     self.project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
     self.aa_dict = mk_aa_dict()
-
+    
+    self.shape = pt_df.shape
+    
   def __len__(self):
     return len(self.df)
   
@@ -216,6 +220,8 @@ class MPTDataSet(Dataset):
     self.bv_dict = mk_bv_dict()
     self.pseudo_mhc_dict = load_mhc_dict(mhc_type, pseudo=True)
     self.esm_mhc_dict = load_mhc_dict(mhc_type, pseudo=False)
+
+    self.shape = mpt_df.shape
 
   def __len__(self):
     return len(self.df)
