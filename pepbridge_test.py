@@ -142,6 +142,7 @@ if __name__ == "__main__":
 
     pt_df = pd.read_csv('pt_test.csv', header=0, index_col=0)
     mp_df = pd.read_csv('External_mp_test.csv', header=0, index_col=0)
+    mp_df_NetMHCpan = pd.read_csv('NetMHCpan_mp_test.csv', header=0, index_col=0)
     mpt_df = pd.read_csv('mpt_test.csv', header=0, index_col=0)
     imm_df = pd.read_csv('immunogenicity_test.csv', header=0, index_col=0)
     mp_contact_df = pd.read_csv('./PepBridge-main/data/mp_pdb_test.csv',  header=0, index_col=0)
@@ -152,7 +153,13 @@ if __name__ == "__main__":
                                 binding=True, 
                                 immunogenicity=False, contact=False, mask=None),
                                 batch_size=128, shuffle=False, drop_last=False)
-
+    
+    mp_loader2 = DataLoader(MPDataSet(mp_df=mp_df_NetMHCpan, mhc_type='HLAI', 
+                                mhc_max_len=34, pep_max_len=15,
+                                binding=True, 
+                                immunogenicity=False, contact=False, mask=None),
+                                batch_size=128, shuffle=False, drop_last=False)
+    
     pt_loader = DataLoader(
         dataset=PTDataSet(pt_df, pep_max_len=15, cdr3_max_len=20,
                                 binding=True, contact=False, 
@@ -191,11 +198,20 @@ if __name__ == "__main__":
 
     logger = setup_logger()
 
+    logger.info('NetMHCpan_mp_binding:')
+    mp_df_NetMHCpan['pred'] = model_inference(model, mp_loader2, 'mp', device)
+    mp_df_NetMHCpan.loc[mp_df_NetMHCpan['len'] >= 12, 'len'] = '12-15'
+    logger.info(binary_evaluate_metrics(mp_df_NetMHCpan['binding'],mp_df_NetMHCpan['pred']))
+    logger.info(binary_evaluate_metrics(mp_df_NetMHCpan['binding'],mp_df_NetMHCpan['pred'],group=mp_df_NetMHCpan['len']))
+    logger.info(binary_evaluate_metrics(mp_df_NetMHCpan['binding'],mp_df_NetMHCpan['pred'],group=mp_df_NetMHCpan['MHC']))
+    
     logger.info('mp_binding:')
     mp_df['pred'] = model_inference(model, mp_loader, 'mp', device)
+    mp_df.loc[mp_df['len'] >= 12, 'len'] = '12-15'
     logger.info(binary_evaluate_metrics(mp_df['binding'],mp_df['pred']))
     logger.info(binary_evaluate_metrics(mp_df['binding'],mp_df['pred'],group=mp_df['len']))
-                
+    logger.info(binary_evaluate_metrics(mp_df['binding'],mp_df['pred'],group=mp_df['MHC']))
+
     logger.info('pt_binding:')
     pt_df['pred'] = model_inference(model, pt_loader, 'pt', device)
     logger.info(binary_evaluate_metrics(pt_df['binding'],pt_df['pred']))
@@ -217,7 +233,8 @@ if __name__ == "__main__":
                                         mp_contact_out['mask']))
     logger.info(distance_evaluate_metrics(mp_contact_out['gt_dist'], 
                                         mp_contact_out['pred_dist'], 
-                                        mp_contact_out['mask']))
+                                        mp_contact_out['mask'],
+                                        distogram=True))
                                         
     logger.info('pt_contact:')
     pt_contact_out = model_inference(model, pt_contact_loader, 'pt_contact', device)

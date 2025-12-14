@@ -17,7 +17,6 @@ def _round_metrics_dict(d, ndigits=4):
             out[k] = v
     return out
 
-
 def _binary_metrics_on_flat(y_true_flat, y_pred_flat, threshold=0.5):
     if y_true_flat.size == 0:
         raise ValueError("none samples")
@@ -127,9 +126,34 @@ def binary_evaluate_metrics(y_true, y_pred, mask=None, threshold=0.5, group=None
 
     return _round_metrics_dict(mean_metrics, ndigits=4)
 
-def distance_evaluate_metrics(y_true, y_pred, mask, eps=1e-8):
+
+def dist_pred_from_logits_np(logits: np.ndarray, bin_centers: np.ndarray):
+    """
+    logits:      [B, mhc_len, pep_len, K] 
+    bin_centers: [K]
+    return:      [B, mhc_len, pep_len]
+    """
+    # softmax(logits): [B, Mh, P, K]
+    max_logits = np.max(logits, axis=-1, keepdims=True)          # [B, Mh, P, 1]
+    exp_logits = np.exp(logits - max_logits)                     # [B, Mh, P, K]
+    probs = exp_logits / np.sum(exp_logits, axis=-1, keepdims=True)  # [B, Mh, P, K]
+
+    # bin_centers: [K] -> [1, 1, 1, K]
+    centers = bin_centers.reshape(1, 1, 1, -1)                    # [1, 1, 1, K]
+
+    pred_dist = np.sum(probs * centers, axis=-1)                  # [B, Mh, P]
+    return pred_dist
+
+def distance_evaluate_metrics(y_true, y_pred, mask, eps=1e-8, distogram=False):
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
+    
+    if distogram:
+        y_pred = dist_pred_from_logits_np(y_pred, 
+        np.array([3.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 18.0, 25.0], 
+                 dtype=np.float32))
+        y_true = np.clip(y_true, None, 30)
+
     mask   = np.asarray(mask).astype(bool)
 
     assert y_true.shape == y_pred.shape == mask.shape

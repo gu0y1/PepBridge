@@ -3,7 +3,7 @@ import torch.nn as nn
 
 class PredHead(nn.Module):
     def __init__(self, d_seq, d_pair, dropout, near_band=4, 
-                 trbv_size=None, use_ln=True):
+                 trbv_size=None, use_ln=True, extra_dim=0):
         super().__init__()
         assert d_seq == d_pair * 2
         self.ln_s = nn.LayerNorm(d_seq)  if use_ln else nn.Identity()
@@ -21,7 +21,7 @@ class PredHead(nn.Module):
                                          embedding_dim=trbv_dim, 
                                          padding_idx=0)
             
-        in_dim = d_seq * 2 + trbv_dim
+        in_dim = d_seq * 2 + trbv_dim + extra_dim
         self.mlp0 = nn.Sequential(nn.Linear(in_dim, 64),
             nn.ReLU(), nn.Dropout(dropout), nn.Linear(64, 1),
         )
@@ -57,7 +57,7 @@ class PredHead(nn.Module):
         v = x_masked.amax(dim=dim)
         return torch.where(torch.isinf(v), torch.zeros_like(v), v)
     
-    def forward(self, seq_repr, pair_repr, chain_id, mask=None, trbv=None):
+    def forward(self, seq_repr, pair_repr, chain_id, mask=None, trbv=None, extra_emb=None):
         assert chain_id is not None, "chain_id can't be None"
         B, L, _ = seq_repr.shape
         device = seq_repr.device
@@ -130,6 +130,10 @@ class PredHead(nn.Module):
             trbv = trbv.squeeze(-1) if trbv.dim() > 1 else trbv     # [B]
             bv_emb = self.trbv_emb(trbv).unsqueeze(1).repeat(1,3,1)                      # [B, 3, 48]
             feats = torch.cat([feats, bv_emb], dim=-1)  # [B, 3, in_dim]
+        
+        if extra_emb is not None:
+            extra_emb = extra_emb.unsqueeze(1).repeat(1,3,1) 
+            feats = torch.cat([feats, extra_emb], dim=-1)
 
         logits = torch.cat([self.mlp0(feats[:,0,:]),
                     self.mlp1(feats[:,1,:]),
@@ -138,12 +142,19 @@ class PredHead(nn.Module):
         return self.fusion(logits)
       
 class ContactPredHead(nn.Module):
-    def __init__(self, d_pair, dropout, use_ln=True, gate=True):
+    def __init__(self, d_pair, dropout, use_ln=True, gate=True,
+                 dist_bin=None):
         super().__init__()
         d_in = d_pair * 2
         self.ln = nn.LayerNorm(d_in)  if use_ln else nn.Identity()
         self.linear = nn.Linear(d_in, d_in)
         self.act_drop = nn.Sequential(nn.ReLU(), nn.Dropout(dropout))
+
+        self.dist_bin = dist_bin
+        if dist_bin is not None:
+            d_out = dist_bin + 1
+        else:
+            d_out = 2
 
         self.gate = gate
         if gate:
@@ -155,7 +166,7 @@ class ContactPredHead(nn.Module):
             nn.Linear(d_in, 64),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(64, 2)
+            nn.Linear(64, d_out)
             )
     
     def forward(self, pair_repr_ab, pair_repr_ba):
@@ -169,8 +180,10 @@ class ContactPredHead(nn.Module):
             feat = feat + pair_repr
 
         out = self.mlp(feat)    
-        #prob = torch.sigmoid(out[:,:,:,0])
-        logits = out[:,:,:,0]
-        dist = torch.relu(out[:,:,:,1])
-        return logits, dist
+        bind_logits = out[:,:,:,0]
+        if self.dist_bin is None:
+            dist_logits = torch.relu(out[:,:,:,1])
+        else:
+            dist_logits = out[:,:,:,1:]
 
+        return bind_logits, dist_logits

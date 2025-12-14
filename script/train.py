@@ -12,12 +12,12 @@ from typing import Dict, Optional, Iterable, Tuple
 from collections import defaultdict
 import matplotlib.pyplot as plt
 
-from .loss import contact_losses, bce_loss
+from .loss import contact_losses, bce_loss, loss_pair_pseudolikelihood
 from .model.lora import build_model_with_lora
 
 task_every = {
-    "mp_contact": 80,  
-    "pt_contact": 80,  
+    "mp_contact": 50,  
+    "pt_contact": 50,  
 }
 
 def rampup_weight(step, warmup=2000, ramp=3000):
@@ -109,9 +109,9 @@ def train_three_phases_multi_loaders(
         freeze_module(model, ['peptide_encoder','cdr3_encoder'],logger)
 
     # λ
-    lambdas_A = dict(align=0.20, MP=1.20, PT=1.00, IMM=0.0, contact=0.0, MPT=0.0, lg=0.0)
-    lambdas_B = dict(align=0.20, MP=1.00, PT=0.80, IMM=0.0, contact=0.04, MPT=0.0, lg=0.0)
-    lambdas_C = dict(align=0.00, MP=0.00, PT=0.00, IMM=1.00, contact=0.00, MPT=1.00, lg=0.00)
+    lambdas_A = dict(align=1.00, MP=1.50, PT=1.00, IMM=0.0, mp_contact=0.0, pt_contact=0.0, MPT=0.0)
+    lambdas_B = dict(align=1.00, MP=1.20, PT=0.80, IMM=0.0, mp_contact=0.40, pt_contact=0.04, MPT=0.0)
+    lambdas_C = dict(align=0.00, MP=0.00, PT=0.00, IMM=1.00, mp_contact=0.0, pt_contact=0.0, MPT=1.00)
 
     phases = {
         "A": dict(lmb=lambdas_A, tasks=("align", "mp", "pt")),
@@ -130,13 +130,16 @@ def train_three_phases_multi_loaders(
         if new_optimizer_each_phase or optimizer is None:
             optimizer = make_optimizer()
         if ph == 'C':
+            if pep_align:
+                ckpt = torch.load(os.path.join(save_dir, "phase_B.pt"), map_location=device)
+                model.load_state_dict(ckpt['model_state'], strict=True)
             freeze_module(model,['peptide_encoder', 'mhc_encoder','chain_id_embedder', 
                                  'mhc_ln','pep_ln','cdr3_ln', 
                                  'mp_joint_embedder', 'pt_joint_embedder',
                                  'mp_pair_aware_trunk','pt_pair_aware_trunk',
                                  'mp_pred_head','pt_pred_head','mp_contact_pred_head','pt_contact_pred_head',
                                  'pep_seq_proj','pep_pair_proj'], 
-                                 logger)
+                                 logger=None)
 
             optimizer = make_optimizer()
 
@@ -231,20 +234,10 @@ def _train_one_phase_multi(
             batches = {name: next(iters[name]) for name in due_tasks}
 
             with autocast(enabled=amp):
-                # multi-dataloader loss
-                loss_parts = compute_losses_multi_batches(
-                    model=model,
-                    device=device,
-                    phase=phase_name,
-                    batches=batches,
-                    pep_align=pep_align,
-                    all_align=all_align,
-                    use_logits=use_logits
-                )
                 if phase_name == 'A':
                     w_align = rampup_weight(step=(epoch-1)*steps_per_epoch + step, 
                                             warmup=0,ramp=5000)
-                    lambdas["align"] = w_align * 0.20
+                    lambdas["align"] = w_align * 1.00
                     
                     w_pt = rampup_weight(step=(epoch-1)*steps_per_epoch + step, 
                                             warmup=5000,ramp=5000)
@@ -253,21 +246,33 @@ def _train_one_phase_multi(
                 elif phase_name == 'B':
                     lambdas["align"] = linear_decay(step=(epoch-1)*steps_per_epoch + step,
                                                     total_steps=epochs*steps_per_epoch, 
-                                                    start=0.20, end=0.00)
+                                                    start=1.00, end=0.00)
                                                     
                     w_contact = rampup_weight(step=(epoch-1)*steps_per_epoch + step, 
-                                            warmup=0,ramp=3000)
-                    lambdas["contact"] = w_contact * 0.04
+                                            warmup=0,ramp=6000)
+                    lambdas["pt_contact"] = w_contact * 0.04
+                    lambdas["mp_contact"] = w_contact * 0.40
+
+                # multi-dataloader loss
+                loss_parts = compute_losses_multi_batches(
+                    model=model,
+                    device=device,
+                    phase=phase_name,
+                    batches=batches,
+                    pep_align=pep_align,
+                    all_align=all_align,
+                    use_logits=use_logits,
+                    l_pt=lambdas["PT"]
+                )
 
                 total = (
                     lambdas["align"]   * loss_parts["align"] +
                     lambdas["MP"]      * loss_parts["MP"] +
                     lambdas["PT"]      * loss_parts["PT"] +
-                    lambdas["contact"] * loss_parts["contact"] +
+                    lambdas["mp_contact"] * loss_parts["mp_contact"] +
+                    lambdas["pt_contact"] * loss_parts["pt_contact"] +
                     lambdas["IMM"]     * loss_parts["IMM"] +
-                    lambdas["MPT"]     * loss_parts["MPT"] +
-                    lambdas["lg"]      * loss_parts["logic_imm"] +
-                    lambdas["lg"]      * loss_parts["logic_mpt"]
+                    lambdas["MPT"]     * loss_parts["MPT"] 
                 )
                 loss = total / grad_accum_steps
 
@@ -293,9 +298,8 @@ def _train_one_phase_multi(
                 msg = (f"[Phase {phase_name}] epoch {epoch}/{epochs} step {step}/{steps_per_epoch} "
                        f"total={avg('total'):.4f} | "
                        f"align={avg('align'):.4f} MP={avg('MP'):.4f} "
-                       f"PT={avg('PT'):.4f} contact={avg('contact'):.4f} "
-                       f"IMM={avg('IMM'):.4f} MPT={avg('MPT'):.4f} "
-                       f"logic_imm={avg('logic_imm'):.4f} logic_mpt={avg('logic_mpt'):.4f}")
+                       f"PT={avg('PT'):.4f} mp_contact={avg('mp_contact'):.4f} pt_contact={avg('pt_contact'):.4f} "
+                       f"IMM={avg('IMM'):.4f} MPT={avg('MPT'):.4f}")
                 logger.info(msg) if logger is not None else print(msg)
 
                 if recorder is not None:
@@ -304,11 +308,10 @@ def _train_one_phase_multi(
                         "align": avg("align"),
                         "MP": avg("MP"),
                         "PT": avg("PT"),
-                        "contact": avg("contact"),
+                        "mp_contact": avg("mp_contact"),
+                        "pt_contact": avg("pt_contact"),
                         "IMM": avg("IMM"),
                         "MPT": avg("MPT"),
-                        "logic_imm": avg("logic_imm"),
-                        "logic_mpt": avg("logic_mpt"),
                     }
                     recorder.log_train(
                         phase=phase_name, epoch=epoch, step=step,
@@ -365,7 +368,7 @@ def evaluate_phase_multi(
     use_logits=True
 ) -> Tuple[Dict[str, float], float]:
     if not val_loaders:
-        zeros = {k: 0.0 for k in ["align","MP","PT","contact","IMM","MPT","logic_imm","logic_mpt"]}
+        zeros = {k: 0.0 for k in ["align","MP","PT","mp_contact",'pt_contact',"IMM","MPT"]}
         return zeros, 0.0
     model.eval()
 
@@ -387,7 +390,7 @@ def evaluate_phase_multi(
         active[k] = dl
 
     if len(active) == 0:
-        zeros = {k: 0.0 for k in ["align","MP","PT","contact","IMM","MPT","logic_imm","logic_mpt"]}
+        zeros = {k: 0.0 for k in ["align","MP","PT","mp_contact",'pt_contact',"IMM","MPT"]}
         return zeros, 0.0
     
     if max_steps is None:
@@ -412,7 +415,8 @@ def evaluate_phase_multi(
             batches=batches,
             pep_align=pep_align,
             all_align=all_align,
-            use_logits=use_logits
+            use_logits=use_logits,
+            l_pt=lambdas["PT"] 
         )
         for k, v in parts.items():
             val = float(v.detach().item())
@@ -420,7 +424,7 @@ def evaluate_phase_multi(
             cnts[k] += 1
     # mean
     means = {}
-    for k in ["align","MP","PT","contact","IMM","MPT","logic_imm","logic_mpt"]:
+    for k in ["align","MP","PT","mp_contact",'pt_contact',"IMM","MPT"]:
         means[k] = (sums[k] / max(cnts[k], 1)) if k in sums else 0.0
 
     # λ
@@ -428,17 +432,17 @@ def evaluate_phase_multi(
         lambdas["align"]   * means["align"]   +
         lambdas["MP"]      * means["MP"]      +
         lambdas["PT"]      * means["PT"]      +
-        lambdas["contact"] * means["contact"] +
+        lambdas["mp_contact"] * means["mp_contact"] +
+        lambdas["pt_contact"] * means["pt_contact"] +
         lambdas["IMM"]     * means["IMM"]     +
-        lambdas["MPT"]     * means["MPT"]     +
-        lambdas["lg"]      * means["logic_imm"] +
-        lambdas["lg"]      * means["logic_mpt"]
+        lambdas["MPT"]     * means["MPT"]    
+
     )
 
     return means, float(val_total)
 
 class MetricsRecorder:
-    TRAIN_KEYS = ["total","align","MP","PT","contact","IMM","MPT","logic_imm","logic_mpt"]
+    TRAIN_KEYS = ["total","align","MP","PT","mp_contact",'pt_contact',"IMM","MPT"]
 
     def __init__(self):
         self.train = []  # list of dict({'phase','epoch','step','epoch_t', each loss...})
@@ -463,7 +467,7 @@ def plot_losses(
     recorder: MetricsRecorder,
     out_dir: str,
     phase: str,
-    keys = ("total","align","MP","PT","contact","IMM","MPT","logic_imm","logic_mpt"),
+    keys = ("total","align","MP","PT","mp_contact","pt_contact","IMM","MPT"),
     dpi: int = 200
 ):
 
@@ -513,11 +517,13 @@ def compute_losses_multi_batches(
     batches: Dict[str, dict], 
     pep_align=True,
     all_align=True,
-    use_logits=True
+    use_logits=True,
+    l_pt=0,
 ) -> Dict[str, torch.Tensor]:
     zeros = torch.tensor(0.0, device=device)
-    out = dict(align=zeros, MP=zeros, PT=zeros, contact=zeros, IMM=zeros, MPT=zeros, 
-               logic_imm=zeros, logic_mpt=zeros)
+    out = dict(align=zeros, MP=zeros, PT=zeros, 
+               mp_contact=zeros, pt_contact=zeros,
+               IMM=zeros, MPT=zeros)
 
     # -------- Align --------
     if (pep_align is True) and (phase in ('A', 'B')):
@@ -552,13 +558,35 @@ def compute_losses_multi_batches(
 
     # -------- PT binding --------
     if ("pt" in batches) and (phase in ('A', 'B')):
-        b = batches["pt"][0]
-        peptide = b["peptide"].to(device)
-        cdr3    = b["cdr3"].to(device)
-        y_pt    = b["y_pt"].to(device).view(-1, 1)
+        if l_pt !=0:
+            b = batches["pt"][0]
+            peptide = b["peptide"].to(device)
+            cdr3_pos = b["cdr3_pos"].to(device)
+            cdr3_neg = b["cdr3_negs"].to(device)
+            B, K, Lc = cdr3_neg.shape[0], cdr3_neg.shape[1], cdr3_neg.shape[2]
+            Lp = peptide.size(1)
+            # y_pt    = b["y_pt"].to(device).view(-1, 1)
 
-        pt_out = model.pt_pred(peptide, cdr3, contact=False)
-        out["PT"] = bce_loss(pt_out["binding_prob"], y_pt, use_logits=use_logits)
+            pos_out = model.pt_pred(peptide, cdr3_pos, contact=False)
+
+            pep_rep = peptide.unsqueeze(1).expand(-1, K, -1).reshape(B*K, Lp)
+            neg_out = model.pt_pred(pep_rep, cdr3_neg.reshape(B*K, Lc), contact=False)
+
+            pos_logit, neg_logit = pos_out["binding_prob"], neg_out["binding_prob"].view(B, K)
+            pos_loss = bce_loss(pos_logit, torch.ones_like(pos_logit), use_logits=use_logits) 
+            
+            neg_top_vals, _ = torch.topk(neg_logit, k=min(2, K), dim=1)
+            neg_loss = bce_loss(neg_top_vals, torch.zeros_like(neg_top_vals), use_logits=use_logits)
+            loss_bce = 0.5 * (pos_loss + neg_loss)
+
+            logits_concat = torch.cat([pos_logit, neg_logit], dim=1)
+            loss_pair = F.cross_entropy(logits_concat / 0.25, 
+                                        torch.zeros(B, dtype=torch.long, device=device))
+            # loss_pair = -F.logsigmoid(pos_logit - neg_logit).mean()
+
+            out["PT"] = loss_bce + 0.1 * loss_pair
+        else:
+            out["PT"] = torch.tensor(0.0, device=device)
 
     # -------- MP contact --------
     if 'mp_contact' in batches:
@@ -582,9 +610,9 @@ def compute_losses_multi_batches(
                 prob_pred=mp_out.get("contact_prob", None),
                 dist_pred=mp_out.get("contact_dist", None),
                 prob_tgt=p_bin, dist_tgt=p_dis, pair_mask=pair_mask,
-                use_logits=use_logits
+                use_logits=use_logits, distogram=True
             )
-            out["contact"] = out["contact"] + lp + ld
+            out["mp_contact"] = out["mp_contact"] + lp + ld
             
     # -------- PT contact --------
     if 'pt_contact' in batches:
@@ -606,9 +634,9 @@ def compute_losses_multi_batches(
                 prob_pred=pt_out.get("contact_prob", None),
                 dist_pred=pt_out.get("contact_dist", None),
                 prob_tgt=p_bin, dist_tgt=p_dis, pair_mask=pair_mask,
-                use_logits=use_logits
+                use_logits=use_logits, distogram=False
             )
-            out["contact"] = out["contact"] + lp + ld
+            out["pt_contact"] = out["pt_contact"] + lp + ld
 
     # -------- IMM --------
     if "imm" in batches:
@@ -624,9 +652,9 @@ def compute_losses_multi_batches(
             out["IMM"] = bce_loss(mp_out["immunogenicity_prob"], y_imm, use_logits=use_logits)
 
             # L_logic_IMM
-            neg = (y_imm.expand_as(mp_out["immunogenicity_prob"]) == 0).float()
-            out["logic_imm"] = out["logic_imm"] + \
-                (F.relu(mp_out["immunogenicity_prob"] - mp_out["binding_prob"] + 0.3) * neg).sum() / neg.sum().clamp_min(1e-8)
+            # neg = (y_imm.expand_as(mp_out["immunogenicity_prob"]) == 0).float()
+            # out["logic_imm"] = out["logic_imm"] + \
+            #     (F.relu(mp_out["immunogenicity_prob"] - mp_out["binding_prob"] + 0.3) * neg).sum() / neg.sum().clamp_min(1e-8)
 
     # -------- MPT --------
     if "mpt" in batches:
@@ -645,8 +673,449 @@ def compute_losses_multi_batches(
             out["MPT"] = bce_loss(mpt_out["mpt_prob"], y_mpt, use_logits=use_logits)
     
             # L_logic_MPT = ReLU(P_MPT - min(P_MP, P_PT))
-            min_mp_pt = torch.minimum(mpt_out["mp_prob"], mpt_out["pt_prob"])
-            neg = (y_mpt.expand_as(mpt_out["mpt_prob"]) == 0).float()
-            out["logic_mpt"] = out["logic_mpt"] + \
-                (F.relu(mpt_out["mpt_prob"] - min_mp_pt + 0.3) * neg).sum() / neg.sum().clamp_min(1e-8)
+            # min_mp_pt = torch.minimum(mpt_out["mp_prob"], mpt_out["pt_prob"])
+            # neg = (y_mpt.expand_as(mpt_out["mpt_prob"]) == 0).float()
+            # out["logic_mpt"] = out["logic_mpt"] + \
+            #     (F.relu(mpt_out["mpt_prob"] - min_mp_pt + 0.3) * neg).sum() / neg.sum().clamp_min(1e-8)
     return out
+
+def train_fintune(
+    model,
+    device,
+    optimizer_ctor,
+    scaler,
+    loader,
+    steps_per_epoch: int,
+    epochs: int,
+    save_path: str,
+    grad_accum_steps: int,
+    amp: bool,
+    log_interval: int,
+    logger=None):
+
+    os.makedirs(save_path, exist_ok=True)
+
+    model.to(device)
+    opt = optimizer_ctor(p for p in model.parameters() if p.requires_grad)
+    scaler = GradScaler(enabled=amp)
+    global_step = 0
+
+    for n, p in model.named_parameters():
+        if n in _to_set(['trav_emb', 'traj_emb', 'mpt_pred_head']):
+            p.requires_grad = True
+        else:
+            p.requires_grad = False
+
+    model.train()
+    for epoch in range(1, epochs + 1):
+        num_steps = 0
+        for step, batch in enumerate(loader):
+            if step >= steps_per_epoch:
+                break
+            global_step += 1
+            num_steps += 1
+            batch    =  batch[0]
+            mhc      = batch["mhc"].to(device)
+            esm_mhc  = batch.get("esm_mhc", None)
+            if esm_mhc is not None:
+                esm_mhc = esm_mhc.to(device)
+            peptide  = batch["peptide"].to(device)
+            cdr3     = batch["cdr3"].to(device)
+            trbv     = batch["trbv"].to(device)
+            score    = batch["score"].to(device)
+            trav     = batch.get("trav", None)
+            if trav is not None:
+                trav = trav.to(device)
+            traj     = batch.get("traj", None)
+            if traj is not None:
+                traj = traj.to(device)
+
+            with autocast(enabled=amp):
+                logits = model.mpt_pred_finetune(
+                    mhc, peptide, cdr3, esm_mhc, trbv, 
+                    trav, traj
+                )
+
+                idx = torch.randperm(logits.size(0), device=logits.device)
+                logits1, logits2 = logits, logits[idx]
+                s1, s2 = score, score[idx]
+                y_pair = (s1 > s2).float() * 2.0 - 1.0  # +1 / -1
+                Lmargin = F.softplus(-(logits2 - logits1) * y_pair).mean()
+
+            scaler.scale(Lmargin / grad_accum_steps).backward()
+
+            if (step + 1) % grad_accum_steps == 0:
+                scaler.step(opt)
+                scaler.update()
+                opt.zero_grad(set_to_none=True) 
+
+            if (global_step % log_interval) == 0:
+                msg = (
+                    f"[Epoch {epoch} Step {step+1}/{steps_per_epoch}] "
+                    f"Lmargin={Lmargin.item():.4f}"
+                )
+                if logger is not None:
+                    logger.info(msg)
+                else:
+                    print(msg)
+                    
+    ckpt_path = os.path.join(save_path, "pepbridge_finetune.pt")
+    torch.save(model.state_dict(), ckpt_path)
+
+def _mrf_energy(
+    seq_logits: torch.Tensor,      # [B, L, A]
+    pair_logits: torch.Tensor,     # [B, L, L, A, A] 或 [B, L, L, A*A]
+    labels: torch.Tensor,          # [B, L] (long)
+    mask=None,  # [B, L] (float/bool)
+):
+    device = seq_logits.device
+    dtype = seq_logits.dtype
+    B, L, A = seq_logits.shape
+
+    if pair_logits.dim() == 5 and pair_logits.shape[-2:] == (A, A):
+        pair_aa = pair_logits
+    elif pair_logits.dim() == 4 and pair_logits.shape[-1] == A * A:
+        pair_aa = pair_logits.view(B, L, L, A, A)
+    else:
+        raise ValueError("pair_logits must be [B,L,L,A,A] or [B,L,L,A*A].")
+
+    if mask is None:
+        mask = torch.ones(B, L, device=device, dtype=dtype)
+    else:
+        mask = mask.to(dtype)
+
+    labels = labels.clamp_min(0).clamp_max(A - 1)
+    y_onehot = F.one_hot(labels, num_classes=A).to(dtype)    # [B, L, A]
+
+    # sum_i h_i(y_i)
+    h_y = torch.gather(seq_logits, dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)  # [B, L]
+    h_y = h_y * mask
+    term_h = h_y.sum(dim=1)  # [B]
+
+    # 0.5 * sum_{i,j} e_ij(y_i, y_j)
+    pair_mask = (mask[:, :, None] * mask[:, None, :])  # [B, L, L]
+    pair_mask = pair_mask.unsqueeze(-1).unsqueeze(-1)  # [B, L, L, 1, 1]
+
+    # [B, 1, L, 1, A] * [B, L, 1, A, 1] -> [B, L, L, A, A]
+    y_i = y_onehot[:, None, :, None, :]    # [B, 1, L, 1, A]
+    y_j = y_onehot[:, :, None, :, None]    # [B, L, 1, A, 1]
+    y_outer = y_i * y_j                    # [B, L, L, A, A]
+
+    pair_contrib = (y_outer * pair_aa * pair_mask).sum(dim=(1, 2, 3, 4))  # [B]
+    term_pair = 0.5 * pair_contrib
+
+    E = -(term_h + term_pair)  # [B]
+    return E
+
+def generator_train(
+    generator: torch.nn.Module,
+    discriminator: torch.nn.Module,
+    loader,  
+    device: str = "cuda",
+    save_dir: str = "./checkpoints_pepbridge_gen",
+    epochs: int = 100,
+    steps_per_epoch: int = 200, 
+    optimizer_ctor=lambda params: torch.optim.AdamW(params, lr=2e-4, weight_decay=0.01),
+    grad_accum_steps: int = 1,
+    amp: bool = True,
+    log_interval: int = 50,
+    val_loader = None,
+    eval_every_epochs: int = 1,
+    val_max_steps: int = 200,
+    logger = None,
+    distillation: bool = False,
+    lambda_bv: float = 0.2,
+    lambda_adv: float = 0.1,
+    lambda_margin: float = 1.0,
+    lambda_base: float = 0.5,
+) -> Tuple[torch.nn.Module, torch.nn.Module]:
+    """
+    PepBridgeGenerator + Discriminator
+
+    Loss(base):
+        L = Lseq + Lpair + λ1 * LBV + λ2 * Ladv
+
+    Loss(distillation):
+        L = Lseq + Lpair + Lmargin + λ1 * LBV + λ2 * Ladv
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    generator.to(device)
+    discriminator.to(device)
+    use_D = not distillation
+    # 两个优化器
+    opt_G = optimizer_ctor(filter(lambda p: p.requires_grad, generator.parameters()))
+    opt_D = optimizer_ctor(filter(lambda p: p.requires_grad, discriminator.parameters())) if use_D else None
+
+    scaler = GradScaler(enabled=amp)
+
+    global_step = 0
+    best_val_loss = float("inf")
+
+    for epoch in range(1, epochs + 1):
+        generator.train()
+        discriminator.train() if use_D else discriminator.eval()
+
+        running = {
+            "G_total": 0.0,
+            "Lseq": 0.0,
+            "Lpair": 0.0,
+            "LBV": 0.0,
+            "Ladv": 0.0,
+            "Lmargin": 0.0,
+            "D_total": 0.0,
+        }
+        num_steps = 0
+
+        opt_G.zero_grad(set_to_none=True)
+        if use_D:
+            opt_D.zero_grad(set_to_none=True)
+
+        for step, batch in enumerate(loader):
+            if step >= steps_per_epoch:
+                break
+            global_step += 1
+            num_steps += 1
+            batch    =  batch[0]
+            mhc      = batch["mhc"].to(device)
+            esm_mhc  = batch.get("esm_mhc", None)
+            if esm_mhc is not None:
+                esm_mhc = esm_mhc.to(device)
+            peptide  = batch["peptide"].to(device)
+            neg_cdr3 = batch["neg_cdr3"].to(device)
+            pos_bv   = batch["pos_bv"].to(device)
+            pos_cdr3 = batch["pos_cdr3"].to(device)
+            cdr3_mask = (neg_cdr3 != 0)
+
+            if use_D:
+                real_bv   = batch["real_bv"].to(device)
+                real_cdr3 = batch["real_cdr3"].to(device)
+            else:
+                score = batch.get("score", None)
+                if score is not None:
+                    score = score.to(device).view(-1)
+
+            # =============== Step 1: D ===============
+            if use_D:
+                for p in discriminator.parameters():
+                    p.requires_grad_(True)
+
+                with autocast(enabled=amp):
+                    with torch.no_grad():
+                        seq_fake_logits, _, bv_logits = generator(mhc, peptide, 
+                                                                neg_cdr3, esm_mhc)
+
+                    D_real1 = discriminator(
+                        pos_cdr3,
+                        cdr3_mask,
+                        pos_bv,
+                        is_logits=False
+                    )
+                    D_real2 = discriminator(
+                        real_cdr3,
+                        cdr3_mask,
+                        real_bv,
+                        is_logits=False
+                    )
+                    D_fake_gen = discriminator(
+                        seq_fake_logits, 
+                        cdr3_mask,
+                        bv_logits,
+                        is_logits=True
+                    )
+
+                    loss_D = (
+                        (F.softplus(-D_real1).mean() + F.softplus(-D_real2).mean()) *0.5 +
+                        F.softplus(D_fake_gen).mean()
+                    )
+
+                scaler.scale(loss_D / grad_accum_steps).backward()
+            else:
+                loss_D = torch.tensor(0.0, device=device)
+
+            # =============== Step 2: G ===============
+            for p in discriminator.parameters():
+                p.requires_grad_(False)
+
+            with autocast(enabled=amp):
+                seq_logits, pair_logits, bv_logits = generator(
+                    mhc, peptide, neg_cdr3, esm_mhc
+                )
+
+                Lseq = F.cross_entropy(seq_logits[cdr3_mask], 
+                                       pos_cdr3[cdr3_mask])
+
+                # pair pseudo-likelihood Lpair
+                Lpair = loss_pair_pseudolikelihood(
+                    seq_logits=seq_logits,
+                    pair_logits=pair_logits,
+                    aatype=pos_cdr3,
+                    mask=cdr3_mask,
+                    pair_mask=None,
+                    lambda_reg=1e-2,
+                    temperature=1.0,
+                    reduction="mean",
+                )
+                LBV = F.cross_entropy(bv_logits, pos_bv)
+
+                # Ladv
+                D_fake_for_G = discriminator(
+                    seq_logits,
+                    cdr3_mask,
+                    bv_logits,
+                    is_logits=True
+                )
+                Ladv = F.softplus(-D_fake_for_G).mean()
+
+                # distillation:
+                if distillation:
+                    if score is None:
+                        Lmargin = seq_logits.new_tensor(0.0)
+                    else:
+                        E = _mrf_energy(
+                            seq_logits=seq_logits,
+                            pair_logits=pair_logits,
+                            labels=pos_cdr3,
+                            mask=cdr3_mask,
+                        )  # [B]
+
+                        # s = (score - score.mean()) / (score.std() + 1e-6)
+
+                        idx = torch.randperm(E.size(0), device=E.device)
+                        E1, E2 = E, E[idx]
+                        s1, s2 = score, score[idx]
+                        y_pair = (s1 > s2).float() * 2.0 - 1.0  # +1 / -1
+
+                        Lmargin = F.softplus(-(E2 - E1) * y_pair).mean()
+                else:
+                    Lmargin = seq_logits.new_tensor(0.0)
+
+                # total loss
+                G_base = Lseq + Lpair + lambda_bv * LBV + lambda_adv * Ladv
+                if distillation:
+                    loss_G = lambda_base * G_base + lambda_margin * Lmargin
+                else:
+                    loss_G = G_base
+
+            scaler.scale(loss_G / grad_accum_steps).backward()
+
+            if (step + 1) % grad_accum_steps == 0:
+                if use_D:
+                    scaler.step(opt_D)
+                scaler.step(opt_G)
+                scaler.update()
+
+                if use_D:
+                    opt_D.zero_grad(set_to_none=True)
+                opt_G.zero_grad(set_to_none=True)
+
+            # 
+            running["G_total"] += loss_G.detach().item()
+            running["D_total"] += loss_D.detach().item()
+            running["Lseq"]    += Lseq.detach().item()
+            running["Lpair"]   += Lpair.detach().item()
+            running["LBV"]     += LBV.detach().item()
+            running["Ladv"]    += Ladv.detach().item()
+            running["Lmargin"] += Lmargin.detach().item()
+
+            if (global_step % log_interval) == 0:
+                msg = (
+                    f"[Epoch {epoch} Step {step+1}/{steps_per_epoch}] "
+                    f"G={loss_G.item():.4f} D={loss_D.item():.4f} | "
+                    f"Lseq={Lseq.item():.4f} Lpair={Lpair.item():.4f} "
+                    f"LBV={LBV.item():.4f} Ladv={Ladv.item():.4f} "
+                    f"Lmargin={Lmargin.item():.4f}"
+                )
+                if logger is not None:
+                    logger.info(msg)
+                else:
+                    print(msg)
+
+        for k in running:
+            running[k] /= max(1, num_steps)
+
+        msg = (
+            f"[Epoch {epoch}] Train: "
+            f"G={running['G_total']:.4f} D={running['D_total']:.4f} | "
+            f"Lseq={running['Lseq']:.4f} Lpair={running['Lpair']:.4f} "
+            f"LBV={running['LBV']:.4f} Ladv={running['Ladv']:.4f} "
+            f"Lmargin={running['Lmargin']:.4f}"
+        )
+        if logger is not None:
+            logger.info(msg)
+        else:
+            print(msg)
+
+        # ================ validation & save ================
+        if (val_loader is not None) and (epoch % eval_every_epochs == 0):
+            generator.eval()
+            discriminator.eval()
+            with torch.no_grad():
+                val_loss,val_Lseq,val_Lpair,val_LBV = 0.0, 0.0, 0.0, 0.0
+                val_steps = 0
+                for v_batch in val_loader:
+                    val_steps += 1
+                    if val_steps > val_max_steps:
+                        break
+
+                    v_batch    =  v_batch[0]
+                    mhc_v      = v_batch["mhc"].to(device)
+                    esm_mhc_v  = v_batch.get("esm_mhc", None)
+                    if esm_mhc_v is not None:
+                        esm_mhc_v = esm_mhc_v.to(device)
+                    peptide_v  = v_batch["peptide"].to(device)
+                    neg_cdr3_v = v_batch["neg_cdr3"].to(device)
+                    pos_bv_v   = v_batch["pos_bv"].to(device)
+                    pos_cdr3_v = v_batch["pos_cdr3"].to(device)
+                    cdr3_mask_v = (neg_cdr3_v != 0)
+
+                    with autocast(enabled=amp):
+                        seq_logits_v, pair_logits_v, bv_logits_v = generator(
+                            mhc_v, peptide_v, neg_cdr3_v, esm_mhc_v
+                        )
+                        Lseq_v = F.cross_entropy(seq_logits_v[cdr3_mask_v], 
+                                                 pos_cdr3_v[cdr3_mask_v])
+                        Lpair_v = loss_pair_pseudolikelihood(
+                            seq_logits_v, pair_logits_v, pos_cdr3_v,
+                            mask=cdr3_mask_v, pair_mask=None,
+                            lambda_reg=1e-2, temperature=1.0, reduction="mean"
+                        )
+                        LBV_v = F.cross_entropy(bv_logits_v, pos_bv_v)
+                        loss_v = Lseq_v + Lpair_v + lambda_bv * LBV_v
+
+                    val_loss += loss_v.item()
+                    val_Lseq  += Lseq_v.item()
+                    val_Lpair += Lpair_v.item()
+                    val_LBV   += LBV_v.item()
+                denom = max(1, val_steps)
+                val_Lseq  /= denom
+                val_Lpair /= denom
+                val_LBV   /= denom
+                val_loss  /= denom
+
+            msg = (f"[Epoch {epoch}] Val: "
+                   f"Total={val_loss:.4f}        | "
+                   f"Lseq={val_Lseq:.4f} "
+                   f"Lpair={val_Lpair:.4f} "
+                   f"LBV={val_LBV:.4f}"
+                   )
+            if logger is not None:
+                logger.info(msg)
+            else:
+                print(msg)
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                ckpt_path = os.path.join(save_dir, "generator.pt")
+                torch.save(generator.state_dict(), ckpt_path)
+                if logger is not None:
+                    logger.info(f"** Save best generator to {ckpt_path}")
+                else:
+                    print(f"** Save best generator to {ckpt_path}")
+    
+    if val_loader is None:
+        ckpt_path = os.path.join(save_dir, "generator.pt")
+        torch.save(generator.state_dict(), ckpt_path)
+
+    ckpt_discriminator = os.path.join(save_dir, "discriminator.pt")
+    torch.save(discriminator.state_dict(), ckpt_discriminator)

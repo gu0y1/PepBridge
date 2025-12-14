@@ -23,18 +23,30 @@ class SharedProj(nn.Module):
             nn.GELU(),
             nn.Linear(r*d, d, bias=False),
         )
-        nn.init.zeros_(self.mlp[-1].weight)   # 使 y ≈ x 起步更稳
+        nn.init.zeros_(self.mlp[-1].weight)  
     def forward(self, x):
-        return x + self.mlp(self.ln(x))       # 残差校准
+        return x + self.mlp(self.ln(x))    
 
 class PepBridge(nn.Module):
     def __init__(self, aa_size, max_len_dict, d_seq, d_head_seq, 
                  d_pair, d_head_pair, dropout, n_layers_dict, 
-                 trbv_size):
+                 trbv_size, trav_size=None, traj_size=None):
         super().__init__()
         self.mhc_len = max_len_dict['mhc']
         self.pep_len = max_len_dict['peptide']
         self.cdr3_len = max_len_dict['cdr3']
+
+        #finetune
+        if trav_size is not None:
+            self.trav_emb = nn.Embedding(num_embeddings=trav_size, 
+                                         embedding_dim=48, 
+                                         padding_idx=0)
+        if traj_size is not None:
+            self.traj_emb = nn.Embedding(num_embeddings=traj_size, 
+                                         embedding_dim=48, 
+                                         padding_idx=0)
+        n_extra = int(trav_size is not None) + int(traj_size is not None)
+        extra_dim = 48 * n_extra
 
         # Encoders 
         self.mhc_encoder = Encoder(
@@ -69,10 +81,10 @@ class PepBridge(nn.Module):
         # Heads
         self.mp_pred_head = PredHead(d_seq, d_pair, dropout)
         self.pt_pred_head = PredHead(d_seq, d_pair, dropout)
-        self.mpt_pred_head = PredHead(d_seq, d_pair, dropout,trbv_size=trbv_size)
+        self.mpt_pred_head = PredHead(d_seq, d_pair, dropout, trbv_size=trbv_size, extra_dim=extra_dim)
         self.imm_pred_head = PredHead(d_seq, d_pair, dropout)
 
-        self.mp_contact_pred_head = ContactPredHead(d_pair, dropout)
+        self.mp_contact_pred_head = ContactPredHead(d_pair, dropout, dist_bin=9)
         self.pt_contact_pred_head = ContactPredHead(d_pair, dropout)
         
         #projector
@@ -323,6 +335,35 @@ class PepBridge(nn.Module):
             'mp_prob': mp_out['binding_prob'],
             'pt_prob': pt_out['binding_prob'],
         }
+
+    def mpt_pred_finetune(self, mhc, peptide, cdr3, esm_mhc, trbv, 
+                          trav=None, traj=None):
+        mp_out = self.mp_pred(mhc, peptide, esm_mhc, contact=False, immunogenicity=False, repr_out=True)
+        pt_out = self.pt_pred(peptide, cdr3, contact=False, repr_out=True)
+
+        seq, pair = self.mpt_repr_encode(
+            mp_out['seq_repr'], mp_out['pair_repr'],
+            pt_out['seq_repr'], pt_out['pair_repr'],
+            mp_out['mask_dict']['mhc'], mp_out['mask_dict']['pep'], pt_out['mask_dict']['cdr3']
+        )
+
+        chain_id = torch.cat([mp_out['chain_id_dict']['mhc'], mp_out['chain_id_dict']['pep'], pt_out['chain_id_dict']['cdr3']], dim=-1)
+        mask = torch.cat([mp_out['mask_dict']['mhc'], mp_out['mask_dict']['pep'], pt_out['mask_dict']['cdr3']], dim=-1).bool()
+        
+        av_emb =  self.trav_emb(trav) if trav is not None else None
+        aj_emb =  self.traj_emb(traj) if traj is not None else None
+
+        if av_emb is not None and aj_emb is not None:
+            extra_emb = torch.cat([av_emb, aj_emb], dim=-1) 
+        elif av_emb is not None:
+            extra_emb = av_emb
+        elif aj_emb is not None:
+            extra_emb = aj_emb
+        else:
+            extra_emb = None
+
+        mpt_logit = self.mpt_pred_head(seq, pair, chain_id, mask, trbv, extra_emb)
+        return mpt_logit
     
     def pep_align(self, mhc, peptide, cdr3, esm_mhc, all_align=-1):
         """Alignment of peptide representation"""
@@ -389,14 +430,19 @@ class PepBridge(nn.Module):
             if x_mp.size(0) < 2:
                 continue
 
-            seq_align_loss = vicreg(x_mp, x_pt)
+            with torch.cuda.amp.autocast(enabled=False):
+                x_mp = F.layer_norm(x_mp.float(), (x_mp.size(-1),))
+                x_pt = F.layer_norm(x_pt.float(), (x_pt.size(-1),))
+                seq_align_loss = vicreg(x_mp, x_pt)
 
-            if pair_mask_flat.any():
-                y_mp = pep_pair_mp.view(-1, pep_pair_mp.size(-1))[pair_mask_flat]  # [N_pair, Dp]
-                y_pt = pep_pair_pt.view(-1, pep_pair_pt.size(-1))[pair_mask_flat]
-                pair_align_loss = F.mse_loss(y_mp, y_pt)
-            else:
-                pair_align_loss = x_mp.new_zeros([])
+                if pair_mask_flat.any():
+                    y_mp = pep_pair_mp.view(-1, pep_pair_mp.size(-1))[pair_mask_flat]  # [N_pair, Dp]
+                    y_pt = pep_pair_pt.view(-1, pep_pair_pt.size(-1))[pair_mask_flat]
+                    y_mp = F.layer_norm(y_mp.float(), (y_mp.size(-1),))
+                    y_pt = F.layer_norm(y_pt.float(), (y_pt.size(-1),))
+                    pair_align_loss = F.mse_loss(y_mp, y_pt)
+                else:
+                    pair_align_loss = x_mp.new_zeros([])
 
             cur_loss = 0.5 * (seq_align_loss + pair_align_loss)
             if align_loss is None:

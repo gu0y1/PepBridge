@@ -198,6 +198,100 @@ class PTDataSet(Dataset):
       out['contact_pt_bin'] = torch.as_tensor(contact_prob, dtype=torch.float32)
     return out, idx  
 
+class MultiNegPairPTDataset(Dataset):
+    def __init__(self, pt_df, pep_max_len, cdr3_max_len,
+                 hard_neg_map,
+                 k_cross=8, k_hard=2,
+                 pep_mask=None, cdr3_mask=None,
+                avoid_duplicates=True):
+        self.df = pt_df.reset_index(drop=True)
+        self.pep_max_len = int(pep_max_len)
+        self.cdr3_max_len = int(cdr3_max_len)
+        self.k_cross = int(k_cross)
+        self.k_hard = int(k_hard)
+        self.k_total = self.k_cross + self.k_hard
+        self.pep_mask = pep_mask
+        self.cdr3_mask = cdr3_mask
+        self.avoid_duplicates = bool(avoid_duplicates)
+
+        self.hard_neg_map = {str(k): list(v) for k, v in dict(hard_neg_map).items()}
+
+        self.aa_dict = mk_aa_dict()
+
+        pos_by_pep = defaultdict(set)
+        for _, row in self.df.iterrows():
+            pep = row['peptide']
+            cpos = row['cdr3']
+            if isinstance(pep, str) and isinstance(cpos, str) and pep and cpos:
+                pos_by_pep[pep].add(cpos)
+        all_pos = set()
+        for s in pos_by_pep.values(): all_pos |= s
+
+        cross_pool_by_pep = {}
+        for pep, s in pos_by_pep.items():
+            cross_pool_by_pep[pep] = list(all_pos - s)
+
+        self.pos_by_pep = {k: list(v) for k, v in pos_by_pep.items()}
+        self.cross_pool_by_pep = cross_pool_by_pep
+        self.global_pos_pool = list(all_pos)
+
+    def __len__(self):
+        return len(self.df)
+
+    # --- utils ---
+    def _encode_seq(self, seq, max_len, mask_prob=None):
+        ids = aa_to_vec(seq, self.aa_dict)
+        if (mask_prob is not None) and (random.random() < mask_prob):
+            ids, _ = get_masked_sample(ids, self.aa_dict, 0.10, 0)
+        ids = pad_1d(ids, max_len, pad_value=0, dtype=int)
+        return torch.as_tensor(ids, dtype=torch.long)
+
+    def _sample_unique_or_choices(self, pool_list, k, ban_set=None):
+        if ban_set:
+            pool = [x for x in pool_list if x not in ban_set]
+        else:
+            pool = list(pool_list)
+
+        picked = []
+        if self.avoid_duplicates and len(pool) >= k:
+            picked = random.sample(pool, k)
+        else:
+            if len(pool) == 0:
+                return picked
+            while len(picked) < k:
+                picked.append(random.choice(pool))
+        return picked[:k]
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        pep = row['peptide']
+        cdr3_pos_seq = row['cdr3']
+
+        cross_pool = self.cross_pool_by_pep.get(pep, self.global_pos_pool)
+        ban = set(self.pos_by_pep.get(pep, [])) | {cdr3_pos_seq}
+        neg_cross = self._sample_unique_or_choices(cross_pool, self.k_cross, ban_set=ban)
+
+        key = pep + "||" + cdr3_pos_seq
+        hard_list = self.hard_neg_map.get(key, [])
+        neg_hard = self._sample_unique_or_choices(hard_list, self.k_hard, ban_set=ban)
+
+        neg_list = list(neg_cross) + list(neg_hard)
+        if len(neg_list) < self.k_total:
+            fill = self._sample_unique_or_choices(cross_pool, self.k_total - len(neg_list), ban_set=set(neg_list) | ban)
+            neg_list.extend(fill)
+
+        pep_ids = self._encode_seq(pep, self.pep_max_len, mask_prob=self.pep_mask)
+        pos_ids = self._encode_seq(cdr3_pos_seq, self.cdr3_max_len, mask_prob=self.cdr3_mask)
+        neg_ids = [self._encode_seq(s, self.cdr3_max_len, mask_prob=self.cdr3_mask) for s in neg_list]
+        neg_ids = torch.stack(neg_ids, dim=0)  # [K_total, Lc]
+
+        out = {
+            'peptide': pep_ids,           # [Lp]
+            'cdr3_pos': pos_ids,          # [Lc]
+            'cdr3_negs': neg_ids,         # [K_total, Lc]， K_total = k_cross + k_hard
+        }
+        return out, idx
+
 class MPTDataSet(Dataset):
   def __init__(self, mpt_df, mhc_type, 
                mhc_max_len, pep_max_len, cdr3_max_len,
@@ -263,7 +357,93 @@ class MPTDataSet(Dataset):
         out['y_mpt'] = torch.tensor(float(row['binding']), dtype=torch.float32)
 
     return out, idx  
+
+class MPTGenDataSet(Dataset):
+  def __init__(self, mpt_df, mhc_type, 
+               mhc_max_len, pep_max_len, cdr3_max_len,
+               bv=False, pos=False, real=False,
+               distillation=False,
+               pep_mask=0.1, cdr3_mask=0.1):
+    self.df = mpt_df
+    self.mhc_type = mhc_type
+
+    self.mhc_max_len = mhc_max_len
+    self.cdr3_max_len = cdr3_max_len
+    self.pep_max_len = pep_max_len
+
+    self.pos = pos
+    self.real = real
+    self.bv = bv
+    self.distillation = distillation
+
+    self.pep_mask = pep_mask
+    self.cdr3_mask = cdr3_mask
+
+    self.aa_dict = mk_aa_dict()
+    self.bv_dict = mk_bv_dict()
+    self.pseudo_mhc_dict = load_mhc_dict(mhc_type, pseudo=True)
+    self.esm_mhc_dict = load_mhc_dict(mhc_type, pseudo=False)
+
+    self.shape = mpt_df.shape
+
+  def __len__(self):
+    return len(self.df)
   
+  def __getitem__(self, idx):
+    row = self.df.iloc[idx]
+    mhc_name = row['MHC']
+    pep_seq  = row['peptide']
+    cdr3_seq = row['cdr3_neg']
+
+    mhc_seq = mhc_to_aa(mhc_name, self.pseudo_mhc_dict)        # str
+    mhc_ids = aa_to_vec(mhc_seq, self.aa_dict)                 # 1D ids
+    mhc_ids = pad_1d(mhc_ids, self.mhc_max_len, pad_value=0, dtype=int)
+
+    esm_mhc = mhc_to_esm(mhc_name, self.esm_mhc_dict) 
+
+    pep_ids = aa_to_vec(pep_seq, self.aa_dict)
+    if self.pep_mask is not None and random.random() < self.pep_mask:
+      pep_ids,_ = get_masked_sample(pep_ids, self.aa_dict, 0.10, 0)
+    pep_ids = pad_1d(pep_ids, self.pep_max_len, pad_value=0, dtype=int)
+
+    cdr3_ids = aa_to_vec(cdr3_seq, self.aa_dict)
+    if self.cdr3_mask is not None and random.random() < self.cdr3_mask:
+      cdr3_ids,_ = get_masked_sample(cdr3_ids, self.aa_dict, 0.10, 0)
+    cdr3_ids = pad_1d(cdr3_ids, self.cdr3_max_len, pad_value=0, dtype=int)
+
+    out = {
+       'mhc': torch.as_tensor(mhc_ids, dtype=torch.long),
+        'peptide': torch.as_tensor(pep_ids, dtype=torch.long),
+        'neg_cdr3': torch.as_tensor(cdr3_ids, dtype=torch.long),
+        'esm_mhc': torch.as_tensor(esm_mhc, dtype=torch.float32)
+    }
+
+    if self.pos:
+        pos_cdr3 = row['cdr3_pos']
+        pos_cdr3 = aa_to_vec(pos_cdr3, self.aa_dict)
+        pos_cdr3 = pad_1d(pos_cdr3, self.cdr3_max_len, pad_value=0, dtype=int)
+        out['pos_cdr3'] = torch.tensor(pos_cdr3, dtype=torch.long)
+        if self.bv:
+            bv_name = row['bv_pos']
+            out['pos_bv'] = torch.tensor(self.bv_dict.get(bv_name, 0), 
+                                         dtype=torch.long)
+
+    if self.real:
+        real_cdr3 = row['cdr3_real']
+        real_cdr3 = aa_to_vec(real_cdr3, self.aa_dict)
+        real_cdr3 = pad_1d(real_cdr3, self.cdr3_max_len, pad_value=0, dtype=int)
+        out['real_cdr3'] = torch.tensor(real_cdr3, dtype=torch.long)
+        if self.bv:
+            bv_name = row['bv_real']
+            out['real_bv'] = torch.tensor(self.bv_dict.get(bv_name, 0), 
+                                         dtype=torch.long)
+            
+    if self.distillation:
+        out['score'] = torch.tensor(float(row['score']), 
+                                    dtype=torch.float32)
+
+    return out, idx  
+
 def rfs_repeat_factors(counts, t=1e-3):
   freqs = counts / counts.sum()
   return np.maximum(1.0, np.sqrt(t / np.clip(freqs, 1e-12, None)))

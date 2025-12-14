@@ -9,16 +9,21 @@ import numpy as np
 
 from .pepbridge import PepBridge
 from .pair_aware_block import PairAwareTrunk
+from .lora import build_model_with_lora
 
 class SeqHead(nn.Module):
     def __init__(self, d_seq, aa_size):
         super().__init__()
-        self.ln = nn.LayerNorm(d_seq)
+        self.mlp = nn.Sequential(
+            nn.Linear(d_seq, d_seq),
+            nn.ReLU(),
+            nn.LayerNorm(d_seq)
+        )
         self.proj = nn.Linear(d_seq, aa_size)
         nn.init.zeros_(self.proj.weight)
 
     def forward(self, s):
-        logits = self.proj(self.ln(s))
+        logits = self.proj(self.mlp(s))
 
         return logits
     
@@ -27,12 +32,16 @@ class PairHead(nn.Module):
         super().__init__()
         self.aa_size = aa_size
 
-        self.ln = nn.LayerNorm(d_pair)
+        self.mlp = nn.Sequential(
+            nn.Linear(d_pair, d_pair),
+            nn.ReLU(),
+            nn.LayerNorm(d_pair)
+        )
         self.proj = nn.Linear(d_pair, aa_size * aa_size)
         nn.init.zeros_(self.proj.weight)
 
     def forward(self, z):
-        logits = self.proj(self.ln(z))
+        logits = self.proj(self.mlp(z))
         logits = rearrange(logits, 'b i j (a c) -> b i j a c', a = self.aa_size)
         logits = 0.5 * (logits + rearrange(logits, 'b i j a c -> b j i c a'))
 
@@ -51,73 +60,124 @@ class ConvBNAct2d(nn.Module):
         x = self.bn(x)
         return self.act(x)
 
+class ConvBNAct1d(nn.Module):
+    def __init__(self, in_ch, out_ch, k: int):
+        super().__init__()
+        pad = k // 2
+        self.conv = nn.Conv1d(in_ch, out_ch, kernel_size=k, padding=pad, bias=False)
+        self.bn = nn.BatchNorm1d(out_ch)
+        self.act = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        # x: [B, C, L]
+        x = self.conv(x)
+        x = self.bn(x)
+        x = self.act(x)
+        return x
+
 class Discriminator(nn.Module):
-    def __init__(self, aa_size, d_seq, 
-                 d_pair, dropout, tau, bv_size):
+    def __init__(
+        self,
+        aa_size: int,
+        bv_size: int,
+        d_emb: int = 64,
+        d_hidden: int = 128,
+        dropout: float = 0.1,
+        tau: float = 1.0,
+    ):
         super().__init__()
         self.aa_size = aa_size
         self.bv_size = bv_size
         self.tau = tau
 
-        self.cnn1 = ConvBNAct2d(1, d_pair, 5)
-        self.cnn2 = ConvBNAct2d(d_pair, d_seq, 3)
-        self.gap = nn.AdaptiveAvgPool2d((1, 1))
+        self.aa_emb = nn.Embedding(aa_size, d_emb, padding_idx=0)
 
         if bv_size is not None:
-            trbv_dim = 48
-            self.trbv_emb = nn.Linear(bv_size, trbv_dim)
+            d_bv = 48
+            self.bv_emb = nn.Embedding(bv_size, 48, padding_idx=0)
         else:
-            trbv_dim = 0
+            d_bv = 0
 
-        in_dim = d_seq + trbv_dim
+        self.cnn1 = ConvBNAct1d(d_emb, d_emb, k=3)
+        self.cnn2 = ConvBNAct1d(d_emb, d_hidden, k=3)
+
+        in_dim = d_hidden + d_bv
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, 64),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(64, 1),
-            nn.Sigmoid()
         )
 
-    def _smooth_then_log(self, probs, eps=0.05):
-        if eps > 0:
-            V = probs.size(-1)
-            probs = probs * (1 - eps) + eps / V
-        return torch.log(probs.clamp_min(1e-6))
+    @staticmethod
+    def _masked_mean_1d(x: torch.Tensor, mask: torch.Tensor):
+        if mask is None:
+            return x.mean(dim=-1)
 
-    def _ids_to_onehot(self, aa_seq, bv):
-        seq = F.one_hot(aa_seq.long().clamp_min(0), num_classes=self.aa_size).to(torch.float)
-        if bv is not None:
-            if bv.dim() == 2 and bv.size(-1) == 1:
-                bv = bv.squeeze(-1)
-            bv = F.one_hot(bv.long().clamp_min(0), num_classes=self.bv_size).to(torch.float)
-            return self._smooth_then_log(seq), self._smooth_then_log(bv)
-        else:
-            return self._smooth_then_log(seq), None
-        
-    def forward(self, seq, mask, bv, is_logits):
+        if mask.dtype != x.dtype:
+            mask = mask.to(dtype=x.dtype)
+        # [B, 1, L]
+        m = mask.unsqueeze(1)
+        num = (x * m).sum(dim=-1)
+        den = m.sum(dim=-1).clamp_min(1e-6)
+        return num / den
+
+    def _seq_to_emb(self, seq, is_logits: bool, mask=None):
         if is_logits:
-            seq = F.log_softmax(seq / self.tau, dim=-1)
-            if bv is not None:
-                bv = F.log_softmax(bv / self.tau, dim=-1)
+            # seq: [B,L,A] logits -> prob
+            probs = F.softmax(seq / self.tau, dim=-1)        # [B,L,A]
+            seq_emb = probs @ self.aa_emb.weight             # [B,L,d_emb]
         else:
-            seq, bv = self._ids_to_onehot(seq, bv)
+            # seq: [B,L] ids
+            seq_ids = seq.long().clamp_min(0)
+            seq_emb = self.aa_emb(seq_ids)                   # [B,L,d_emb]
 
         if mask is not None:
-            fill = -math.log(self.aa_size)        
-            seq = seq.masked_fill(~mask.unsqueeze(-1).bool(), fill)
+            seq_emb = seq_emb * mask.unsqueeze(-1).to(seq_emb.dtype)
 
-        s = seq.unsqueeze(1) 
-        s = self.cnn1(s)                       
-        s = self.cnn2(s) 
-        s = self.gap(s).flatten(1)
+        return seq_emb
 
-        if (bv is not None) and (self.bv_size is not None):
-            bv_emb = self.trbv_emb(bv) 
-            feat = torch.cat([s, bv_emb], dim=-1)
+    def _bv_to_emb(self, bv, is_logits: bool):
+        if bv is None:
+            return None
+        if is_logits:
+            # bv: [B,bv_size] logits
+            probs = F.softmax(bv / self.tau, dim=-1)         # [B,V]
+            bv_emb = probs @ self.bv_emb.weight              # [B,d_bv]
         else:
-            feat = s
+            # bv: [B] or [B,1] ids
+            if bv.dim() == 2 and bv.size(-1) == 1:
+                bv = bv.squeeze(-1)
+            bv_ids = bv.long().clamp_min(0)
+            bv_emb = self.bv_emb(bv_ids)                     # [B,d_bv]
+        return bv_emb
 
-        logits = self.mlp(feat)           
+    def forward(self, seq, mask, bv, is_logits: bool):
+        if mask is None:
+            mask = torch.ones(seq.shape[0], seq.shape[1],
+                              device=seq.device, dtype=torch.bool)
+        else:
+            mask = mask.to(device=seq.device, dtype=torch.bool)
+
+        seq_emb = self._seq_to_emb(seq, is_logits=is_logits, mask=mask)  # [B,L,d_emb]
+
+        # [B,L,d_emb] -> [B,d_emb,L] 
+        x = seq_emb.transpose(1, 2).contiguous()  # [B,d_emb,L]
+        x = self.cnn1(x)                          # [B,d_hidden,L]
+        x = self.cnn2(x)                          # [B,d_hidden,L]
+
+        # masked pooling -> [B,d_hidden]
+        seq_feat = self._masked_mean_1d(x, mask=mask)  # [B,d_hidden]
+
+        #
+        bv_emb = self._bv_to_emb(bv, is_logits=is_logits)  # [B,d_bv] or None
+
+        if bv_emb is not None:
+            feat = torch.cat([seq_feat, bv_emb], dim=-1)   # [B, d_hidden+d_bv]
+        else:
+            feat = seq_feat
+
+        logits = self.mlp(feat)   # [B,1]
         return logits
 
 class BVPredHead(nn.Module):
@@ -126,19 +186,14 @@ class BVPredHead(nn.Module):
         self.ln_mp = nn.LayerNorm(d_seq)
         self.ln_cdr3 = nn.LayerNorm(d_seq)
 
-        self.linear_mp = nn.Linear(d_seq, d_seq, bias=False)
-        self.linear_cdr3 = nn.Linear(d_seq, d_seq, bias=False)
-
-        self.g_mp_proj = nn.Linear(d_seq * 2, d_seq)
-        self.g_cdr3_proj  = nn.Linear(d_seq * 2, d_seq)
-        nn.init.zeros_(self.g_mp_proj.weight); torch.nn.init.ones_(self.g_mp_proj.bias)
-        nn.init.zeros_(self.g_cdr3_proj.weight); torch.nn.init.ones_(self.g_cdr3_proj.bias)
+        self.linear_mp = nn.Linear(d_seq, d_seq // 2, bias=False)
+        self.linear_cdr3 = nn.Linear(d_seq, d_seq // 2, bias=False)
         
         self.mlp = nn.Sequential(
-            nn.Linear(d_seq * 2, 64),
+            nn.Linear(d_seq * 2, d_seq),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(64, bv_size)
+            nn.Linear(d_seq, bv_size)
         )
 
     @staticmethod
@@ -168,8 +223,6 @@ class BVPredHead(nn.Module):
         else:
             mp_mean = mp.mean(dim=1)
             mp_max  = mp.amax(dim=1)
-        gate_mp = torch.sigmoid(self.g_mp_proj(torch.cat([mp_mean, mp_max],dim=-1)))
-        mp_feat = mp_mean + gate_mp * (mp_max - mp_mean)   # [B, d_seq]
 
         if mask_cdr3 is not None:
             cdr3_mean = self._masked_mean(cdr3, mask_cdr3, dim=1)    # [B, d_seq]
@@ -177,17 +230,14 @@ class BVPredHead(nn.Module):
         else:
             cdr3_mean = cdr3.mean(dim=1)
             cdr3_max  = cdr3.amax(dim=1)
-        gate_cdr3 = torch.sigmoid(self.g_cdr3_proj(torch.cat([cdr3_mean, cdr3_max],dim=-1)))
-        cdr3_feat = cdr3_mean + gate_cdr3 * (cdr3_max - cdr3_mean)   # [B, d_seq]
 
-        logits = self.mlp(torch.cat([mp_feat, cdr3_feat],dim=-1))
-
+        logits = self.mlp(torch.cat([mp_mean, mp_max, cdr3_mean, cdr3_max],dim=-1))
         return logits
     
 class PepBridgeGenerator(nn.Module):
     def __init__(self, aa_size, max_len_dict, d_seq, d_head_seq, 
                  d_pair, d_head_pair, dropout, n_layers_dict, 
-                 trbv_size, film=False):
+                 trbv_size, film=False, lora=True):
         super().__init__()        
         self.mhc_len = max_len_dict['mhc']
         self.pep_len = max_len_dict['peptide']
@@ -205,12 +255,19 @@ class PepBridgeGenerator(nn.Module):
             nn.init.zeros_(self.ctx_to_film_pair[-1].weight)
             nn.init.zeros_(self.ctx_to_film_pair[-1].bias)
 
-        self.pepbridge = PepBridge(
-            aa_size, max_len_dict, d_seq, d_head_seq, 
-            d_pair, d_head_pair, dropout, n_layers_dict, trbv_size)
+        if lora:
+            self.pepbridge = build_model_with_lora(PepBridge(
+                aa_size, max_len_dict, d_seq, d_head_seq, 
+                d_pair, d_head_pair, dropout, n_layers_dict, trbv_size), 
+                last_n=2, cfg_seq_pair=((8,16),(4,8)), 
+                dropout=0.1, freeze_base=False)
+        else:
+            self.pepbridge = PepBridge(
+                aa_size, max_len_dict, d_seq, d_head_seq, 
+                d_pair, d_head_pair, dropout, n_layers_dict, trbv_size)
         
         self.pair_aware_trunk = PairAwareTrunk(d_seq, d_head_seq, d_pair, d_head_pair, 
-                                                dropout, n_layers=12)
+                                               dropout, n_layers=n_layers_dict['gen'])
         self.prev_seq_norm = nn.LayerNorm(d_seq)
         self.prev_pair_norm = nn.LayerNorm(d_pair)
         
@@ -246,7 +303,7 @@ class PepBridgeGenerator(nn.Module):
         seq_ctx = (seq * w).sum(1) / (w.sum(1) + 1e-6)  
 
         pair_w = mask.unsqueeze(2).float() * mask.unsqueeze(1).float()                  # [B,D_seq]
-        pair_ctx = (pair * pair_w.unsqueeze(-1)).sum(1,2) / pair_w.sum(dim=(1, 2)).clamp_min(1e-6).unsqueeze(-1)
+        pair_ctx = (pair * pair_w.unsqueeze(-1)).sum(dim=(1, 2)) / pair_w.sum(dim=(1, 2)).clamp_min(1e-6).unsqueeze(-1)
 
         gamma_seq, beta_seq   = self.ctx_to_film_seq(seq_ctx).chunk(2, dim=-1)   # [B,D_seq]×2
         gamma_pair, beta_pair = self.ctx_to_film_pair(pair_ctx).chunk(2, dim=-1)  # [B,D_pair]×2
@@ -301,7 +358,7 @@ class PepBridgeGenerator(nn.Module):
 
         bv_logits = self.bv_head(
             mp_seq.detach(), cdr3_seq_act, 
-            mp_mask, cdr3_mask
+            mp_mask.detach(), cdr3_mask
             )
 
         return seq_logits, pair_logits, bv_logits
