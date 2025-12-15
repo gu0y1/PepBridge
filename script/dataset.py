@@ -197,13 +197,13 @@ class PTDataSet(Dataset):
       out['contact_pt_dist'] = torch.as_tensor(contact_dist, dtype=torch.float32)
       out['contact_pt_bin'] = torch.as_tensor(contact_prob, dtype=torch.float32)
     return out, idx  
-
+  
 class MultiNegPairPTDataset(Dataset):
     def __init__(self, pt_df, pep_max_len, cdr3_max_len,
                  hard_neg_map,
                  k_cross=8, k_hard=2,
                  pep_mask=None, cdr3_mask=None,
-                avoid_duplicates=True):
+                 avoid_duplicates=True):
         self.df = pt_df.reset_index(drop=True)
         self.pep_max_len = int(pep_max_len)
         self.cdr3_max_len = int(cdr3_max_len)
@@ -443,7 +443,7 @@ class MPTGenDataSet(Dataset):
                                     dtype=torch.float32)
 
     return out, idx  
-
+  
 def rfs_repeat_factors(counts, t=1e-3):
   freqs = counts / counts.sum()
   return np.maximum(1.0, np.sqrt(t / np.clip(freqs, 1e-12, None)))

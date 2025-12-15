@@ -41,7 +41,8 @@ def freeze_module(model, module_names, logger=None):
     for name, module in model.named_modules():
         if name in targets:
             msg = (f"Freezing module: {name}")
-            logger.info(msg) if logger is not None else print(msg)
+            if logger is not None:
+                logger.info(msg)
             for param in module.parameters():
                 param.requires_grad = False
 
@@ -77,6 +78,7 @@ def train_three_phases_multi_loaders(
     eval_every_epochs=1,
     pep_align=True,
     all_align=True,
+    ln=False,
     use_lora=True,
     last_n=2,
     cfg_seq_pair=((8,16),(4,8)),
@@ -109,8 +111,8 @@ def train_three_phases_multi_loaders(
         freeze_module(model, ['peptide_encoder','cdr3_encoder'],logger)
 
     # λ
-    lambdas_A = dict(align=1.00, MP=1.50, PT=1.00, IMM=0.0, mp_contact=0.0, pt_contact=0.0, MPT=0.0)
-    lambdas_B = dict(align=1.00, MP=1.20, PT=0.80, IMM=0.0, mp_contact=0.40, pt_contact=0.04, MPT=0.0)
+    lambdas_A = dict(align=0.20, MP=1.20, PT=1.00, IMM=0.0, mp_contact=0.0, pt_contact=0.0, MPT=0.0)
+    lambdas_B = dict(align=0.20, MP=1.00, PT=0.80, IMM=0.0, mp_contact=0.40, pt_contact=0.04, MPT=0.0)
     lambdas_C = dict(align=0.00, MP=0.00, PT=0.00, IMM=1.00, mp_contact=0.0, pt_contact=0.0, MPT=1.00)
 
     phases = {
@@ -130,9 +132,9 @@ def train_three_phases_multi_loaders(
         if new_optimizer_each_phase or optimizer is None:
             optimizer = make_optimizer()
         if ph == 'C':
-            if pep_align:
-                ckpt = torch.load(os.path.join(save_dir, "phase_B.pt"), map_location=device)
-                model.load_state_dict(ckpt['model_state'], strict=True)
+            # if pep_align:
+            #     ckpt = torch.load(os.path.join(save_dir, "phase_B.pt"), map_location=device)
+            #     model.load_state_dict(ckpt['model_state'], strict=True)
             freeze_module(model,['peptide_encoder', 'mhc_encoder','chain_id_embedder', 
                                  'mhc_ln','pep_ln','cdr3_ln', 
                                  'mp_joint_embedder', 'pt_joint_embedder',
@@ -170,6 +172,7 @@ def train_three_phases_multi_loaders(
             eval_every_epochs=eval_every_epochs,
             pep_align=pep_align,
             all_align=all_align,
+            ln=ln,
             use_lora=use_lora,
             recorder=recorder,
             logger=logger,
@@ -198,6 +201,7 @@ def _train_one_phase_multi(
     eval_every_epochs: int = 1,
     pep_align=True,
     all_align=True,
+    ln=False,
     use_lora=True,
     recorder=None, 
     logger=None,
@@ -237,7 +241,7 @@ def _train_one_phase_multi(
                 if phase_name == 'A':
                     w_align = rampup_weight(step=(epoch-1)*steps_per_epoch + step, 
                                             warmup=0,ramp=5000)
-                    lambdas["align"] = w_align * 1.00
+                    lambdas["align"] = w_align * 0.20
                     
                     w_pt = rampup_weight(step=(epoch-1)*steps_per_epoch + step, 
                                             warmup=5000,ramp=5000)
@@ -246,10 +250,10 @@ def _train_one_phase_multi(
                 elif phase_name == 'B':
                     lambdas["align"] = linear_decay(step=(epoch-1)*steps_per_epoch + step,
                                                     total_steps=epochs*steps_per_epoch, 
-                                                    start=1.00, end=0.00)
+                                                    start=0.20, end=0.00)
                                                     
                     w_contact = rampup_weight(step=(epoch-1)*steps_per_epoch + step, 
-                                            warmup=0,ramp=6000)
+                                            warmup=0,ramp=4500)
                     lambdas["pt_contact"] = w_contact * 0.04
                     lambdas["mp_contact"] = w_contact * 0.40
 
@@ -261,6 +265,7 @@ def _train_one_phase_multi(
                     batches=batches,
                     pep_align=pep_align,
                     all_align=all_align,
+                    ln=ln,
                     use_logits=use_logits,
                     l_pt=lambdas["PT"]
                 )
@@ -330,6 +335,7 @@ def _train_one_phase_multi(
                 max_steps=200,
                 pep_align=pep_align,
                 all_align=all_align,
+                ln=ln,
                 use_logits=use_logits
             )
             parts = " ".join(f"{k}={v:.4f}" for k, v in val_parts.items())
@@ -365,6 +371,7 @@ def evaluate_phase_multi(
     max_steps=None, 
     pep_align=True,
     all_align=True,
+    ln=False,
     use_logits=True
 ) -> Tuple[Dict[str, float], float]:
     if not val_loaders:
@@ -415,8 +422,9 @@ def evaluate_phase_multi(
             batches=batches,
             pep_align=pep_align,
             all_align=all_align,
+            ln=ln,
             use_logits=use_logits,
-            l_pt=lambdas["PT"] 
+            l_pt=lambdas["PT"]
         )
         for k, v in parts.items():
             val = float(v.detach().item())
@@ -517,8 +525,9 @@ def compute_losses_multi_batches(
     batches: Dict[str, dict], 
     pep_align=True,
     all_align=True,
+    ln=False,
     use_logits=True,
-    l_pt=0,
+    l_pt=0
 ) -> Dict[str, torch.Tensor]:
     zeros = torch.tensor(0.0, device=device)
     out = dict(align=zeros, MP=zeros, PT=zeros, 
@@ -535,7 +544,7 @@ def compute_losses_multi_batches(
             esm_mhc = b.get("esm_mhc", None)
             if esm_mhc is not None: esm_mhc = esm_mhc.to(device)
 
-            out["align"] = model.pep_align(mhc, peptide, cdr3, esm_mhc,all_align=all_align)
+            out["align"] = model.pep_align(mhc, peptide, cdr3, esm_mhc, all_align=all_align, ln=ln)
     else:
         out["align"] = torch.tensor(0.0, device=device)
 
@@ -575,16 +584,16 @@ def compute_losses_multi_batches(
             pos_logit, neg_logit = pos_out["binding_prob"], neg_out["binding_prob"].view(B, K)
             pos_loss = bce_loss(pos_logit, torch.ones_like(pos_logit), use_logits=use_logits) 
             
-            neg_top_vals, _ = torch.topk(neg_logit, k=min(2, K), dim=1)
+            neg_top_vals, _ = torch.topk(neg_logit, k=min(4, K), dim=1)
             neg_loss = bce_loss(neg_top_vals, torch.zeros_like(neg_top_vals), use_logits=use_logits)
-            loss_bce = 0.5 * (pos_loss + neg_loss)
+            loss_bce = 0.6*pos_loss + 0.4*neg_loss
 
             logits_concat = torch.cat([pos_logit, neg_logit], dim=1)
             loss_pair = F.cross_entropy(logits_concat / 0.25, 
                                         torch.zeros(B, dtype=torch.long, device=device))
             # loss_pair = -F.logsigmoid(pos_logit - neg_logit).mean()
 
-            out["PT"] = loss_bce + 0.1 * loss_pair
+            out["PT"] = loss_bce + 0.1*loss_pair
         else:
             out["PT"] = torch.tensor(0.0, device=device)
 
@@ -925,7 +934,7 @@ def generator_train(
                     )
 
                     loss_D = (
-                        (F.softplus(-D_real1).mean() + F.softplus(-D_real2).mean()) *0.5 +
+                        (F.softplus(-D_real1).mean()*0.2 + F.softplus(-D_real2).mean()*0.8) +
                         F.softplus(D_fake_gen).mean()
                     )
 

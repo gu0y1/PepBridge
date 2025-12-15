@@ -70,7 +70,7 @@ if __name__ == "__main__":
                 bv=True, pos=True, real=True,
                 distillation=False,
                 pep_mask=None, cdr3_mask=0.5),
-                batch_size=128, shuffle=True, sampler=None)
+                batch_size=128, shuffle=False, sampler=train_sampler)
 
     gen_val_loader = build_loader_uniform_by_peptide(   
             MPTGenDataSet(mpt_df=gen_val, mhc_type='HLAI', 
@@ -96,7 +96,7 @@ if __name__ == "__main__":
             trbv_size=len(bv_dict), film=True, lora=True).to(device)
 
     discriminator = Discriminator(aa_size=len(aa_dict),bv_size=len(bv_dict),
-                                d_emb=64, d_hidden=128, dropout=0.1, tau=0.5).to(device)
+                                d_emb=64, d_hidden=128, dropout=0.1, tau=0.3).to(device)
 
     pepbridge_pama = torch.load(pepbridge_dir, map_location=device)
     state_dict = pepbridge_pama['model_state']
@@ -125,7 +125,7 @@ if __name__ == "__main__":
             freeze_base=False, 
         )
         freeze_module_except_lora(generator.pepbridge.mpt_pair_aware_trunk)
-        logger.info("[configure_pepbridge] mode = LoRA, only LoRA in mpt trunk is trainable")
+        logger.info("[configure_pepbridge] mode = LoRA, only LoRA in mpt_pair_aware_trunk is trainable")
     else:
         if finetune_trunk:
             for p in generator.pepbridge.mpt_pair_aware_trunk.parameters():
@@ -141,7 +141,7 @@ if __name__ == "__main__":
         loader=gen_train_loader,  
         device = device,
         save_dir=save_dir,
-        epochs=30,
+        epochs=20,
         steps_per_epoch=1000, 
         optimizer_ctor=lambda params: torch.optim.AdamW(params, lr=5e-5, weight_decay=0.01),
         grad_accum_steps=1,

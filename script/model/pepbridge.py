@@ -365,7 +365,7 @@ class PepBridge(nn.Module):
         mpt_logit = self.mpt_pred_head(seq, pair, chain_id, mask, trbv, extra_emb)
         return mpt_logit
     
-    def pep_align(self, mhc, peptide, cdr3, esm_mhc, all_align=-1):
+    def pep_align(self, mhc, peptide, cdr3, esm_mhc, all_align=-1, ln=False):
         """Alignment of peptide representation"""
         repr_dict, mask_dict, _ = self.aa_seq_encode(
             mhc=mhc, peptide=peptide, cdr3=cdr3, esm_mhc=esm_mhc
@@ -431,16 +431,18 @@ class PepBridge(nn.Module):
                 continue
 
             with torch.cuda.amp.autocast(enabled=False):
-                x_mp = F.layer_norm(x_mp.float(), (x_mp.size(-1),))
-                x_pt = F.layer_norm(x_pt.float(), (x_pt.size(-1),))
-                seq_align_loss = vicreg(x_mp, x_pt)
+                if ln:
+                    x_mp = F.layer_norm(x_mp, (x_mp.size(-1),))
+                    x_pt = F.layer_norm(x_pt, (x_pt.size(-1),))
+                seq_align_loss = vicreg(x_mp.float(), x_pt.float())
 
                 if pair_mask_flat.any():
                     y_mp = pep_pair_mp.view(-1, pep_pair_mp.size(-1))[pair_mask_flat]  # [N_pair, Dp]
                     y_pt = pep_pair_pt.view(-1, pep_pair_pt.size(-1))[pair_mask_flat]
-                    y_mp = F.layer_norm(y_mp.float(), (y_mp.size(-1),))
-                    y_pt = F.layer_norm(y_pt.float(), (y_pt.size(-1),))
-                    pair_align_loss = F.mse_loss(y_mp, y_pt)
+                    if ln:
+                        y_mp = F.layer_norm(y_mp, (y_mp.size(-1),))
+                        y_pt = F.layer_norm(y_pt, (y_pt.size(-1),))
+                    pair_align_loss = F.mse_loss(y_mp.float(), y_pt.float())
                 else:
                     pair_align_loss = x_mp.new_zeros([])
 

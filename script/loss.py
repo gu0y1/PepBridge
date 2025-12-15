@@ -105,10 +105,8 @@ class MPDistogramLoss(nn.Module):
 
         # ===== log_prob =====
         log_probs = F.log_softmax(logits_valid, dim=-1)  # [N_valid, K]
-
         # ===== soft ce loss / KL=====
         loss = -(y_probs * log_probs).sum(dim=-1).mean()
-        # loss = F.kl_div(y_probs, log_probs)
 
         return loss
 
@@ -135,9 +133,10 @@ def contact_losses(prob_pred, dist_pred, prob_tgt,
         # posmask = ((prob_tgt > 0.5) & pair_mask).to(ce.dtype) 
         # w = 1.0 + (pw - 1.0) * posmask
         loss_prob = _batch_masked_mean(ce, pair_mask)
+
     if (dist_pred is not None) and (dist_tgt is not None):
         if distogram:
-            criterion_mp = MPDistogramLoss(sigmas=None)
+            criterion_mp = MPDistogramLoss()
             loss_dist = criterion_mp(dist_pred, dist_tgt, pair_mask)
         else:
             mse = F.mse_loss(dist_pred, dist_tgt, reduction="none")

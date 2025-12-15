@@ -48,14 +48,18 @@ def str2bool(v: str) -> bool:
 
 if __name__ == "__main__":
     os.chdir('/data5/tem/laiwp131/pMHC_TCR_20251103/')
-
+    logger = setup_logger()
+    
     cli_args = parse_kv_args(sys.argv)
     default_ckpt_path = './checkpoints_multi_lora_align_all/'
     save_root = cli_args.get("path", default_ckpt_path)
 
     pep_align = str2bool(cli_args.get("pep_align", "true"))
     all_align =  cli_args.get("all_align", -3)
-
+    ln = str2bool(cli_args.get("ln", "False"))
+    msg = f"pep_align: {pep_align}, all_align: {all_align}, ln: {ln}"
+    logger.info(msg)
+    
     aa_dict = mk_aa_dict()
     bv_dcit = mk_bv_dict()
 
@@ -72,7 +76,7 @@ if __name__ == "__main__":
     mp_contact_df = pd.read_csv('./PepBridge-main/data/mp_pdb_train.csv',  header=0, index_col=0)
     pt_contact_df = pd.read_csv('./PepBridge-main/data/pt_pdb_train.csv', header=0, index_col=0)
 
-    logger = setup_logger()
+    
     seed=42
     mhc_max_len=34
     pep_max_len=15
@@ -81,7 +85,7 @@ if __name__ == "__main__":
 
     for i in range(n_folds): 
         logger.info(f"\n========== Fold {i+1} / {n_folds} ==========\n")
-        save_dir = save_root + f"fold_{i}"
+        save_dir = save_root + f"fold_{i+1}"
         pt_train, pt_val, meta_train, meta_val = df_train_test_split(pt_df, seed=seed, n_splits=n_folds, 
                                                                     fold=i, meta=pt_neg_dict)
         mp_train, mp_val = df_train_test_split(mp_df, seed=seed, n_splits=n_folds, fold=i)
@@ -221,18 +225,19 @@ if __name__ == "__main__":
             loaders=train_loaders,
             device="cuda",
             save_dir=save_dir,
-            epochs_A=60, epochs_B=40, epochs_C=20,
-            steps_per_epoch=200,
+            epochs_A=12, epochs_B=9, epochs_C=6,
+            steps_per_epoch=1000,
             optimizer_ctor=lambda params: torch.optim.AdamW(params, lr=5e-4, weight_decay=0.01),
             grad_accum_steps=1,
             amp=True,
             new_optimizer_each_phase=False,
-            log_interval=50,
+            log_interval=200,
             task_every = {"mp_contact": 50, "pt_contact": 50},   #
             val_loaders= val_loaders,
             eval_every_epochs=1,
             pep_align=pep_align,
             all_align=all_align,
+            ln=ln,
             use_lora=True,
             last_n=2,
             cfg_seq_pair=((8,16),(4,8)),
