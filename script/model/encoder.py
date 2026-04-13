@@ -14,7 +14,7 @@ class DecoderHead(nn.Module):
         )
         self.linear_decoder = nn.Linear(d_seq, aa_size)
         if embedding_weights is not None:
-            self.linear_decoder.weight = nn.Parameter(embedding_weights)
+            self.linear_decoder.weight = embedding_weights
         self.linear_decoder.bias = nn.Parameter(torch.zeros(aa_size))
     
     def forward(self, seq_repr):

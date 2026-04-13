@@ -3,29 +3,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Callable, Union
 
+try:
+    from torch.amp import autocast
+except ImportError:
+    from torch.cuda.amp import autocast
+
 from .pair_aware_block import PairAwareTrunk
 from .encoder import Encoder
 from .joint_embedder import JointEmbedder
 from .predicted_head import PredHead, ContactPredHead
 from ..loss import vicreg
 
-HeadType = Union[torch.nn.Module, Callable[..., torch.Tensor]]
-
-## max_len{mhc:34, peptide:15, cdr3:20}
-## pair_aware_trunk n_layers 3 6 6 3 3 1
-
-class SharedProj(nn.Module):
-    def __init__(self, d, r=2):
-        super().__init__()
-        self.ln = nn.LayerNorm(d)
-        self.mlp = nn.Sequential(
-            nn.Linear(d, r*d, bias=False),
-            nn.GELU(),
-            nn.Linear(r*d, d, bias=False),
-        )
-        nn.init.zeros_(self.mlp[-1].weight)  
-    def forward(self, x):
-        return x + self.mlp(self.ln(x))    
+HeadType = Union[torch.nn.Module, Callable[..., torch.Tensor]] 
 
 class PepBridge(nn.Module):
     def __init__(self, aa_size, max_len_dict, d_seq, d_head_seq, 
@@ -88,8 +77,8 @@ class PepBridge(nn.Module):
         self.pt_contact_pred_head = ContactPredHead(d_pair, dropout)
         
         #projector
-        self.pep_seq_proj = SharedProj(d_seq)
-        self.pep_pair_proj = SharedProj(d_pair)
+        # self.pep_seq_proj = SharedProj(d_seq)
+        # self.pep_pair_proj = SharedProj(d_pair)
     
     @staticmethod
     def _tokens_to_mask(x: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
@@ -415,30 +404,27 @@ class PepBridge(nn.Module):
             pep_seq_mp  = mp_seq_list[i][:, self.mhc_len:self.mhc_len+self.pep_len, :]
             pep_pair_mp = mp_pair_list[i][:, self.mhc_len:self.mhc_len+self.pep_len,
                                             self.mhc_len:self.mhc_len+self.pep_len, :]
-            with torch.no_grad():
-                pep_seq_mp  = self.pep_seq_proj(pep_seq_mp)
-                pep_pair_mp = self.pep_pair_proj(pep_pair_mp)
+            pep_seq_mp  = pep_seq_mp.detach()
+            pep_pair_mp = pep_pair_mp.detach()
 
             pep_seq_pt  = pt_seq_list[i][:, :self.pep_len, :]
             pep_pair_pt = pt_pair_list[i][:, :self.pep_len, :self.pep_len, :]
-            pep_seq_pt  = self.pep_seq_proj(pep_seq_pt)
-            pep_pair_pt = self.pep_pair_proj(pep_pair_pt)
 
-            x_mp = pep_seq_mp.view(-1, pep_seq_mp.size(-1))[token_mask_flat]  # [N_tok, D]
-            x_pt = pep_seq_pt.view(-1, pep_seq_pt.size(-1))[token_mask_flat]  # [N_tok, D]
+            x_mp = pep_seq_mp.reshape(-1, pep_seq_mp.size(-1))[token_mask_flat]  # [N_tok, D]
+            x_pt = pep_seq_pt.reshape(-1, pep_seq_pt.size(-1))[token_mask_flat]  # [N_tok, D]
 
             if x_mp.size(0) < 2:
                 continue
 
-            with torch.cuda.amp.autocast(enabled=False):
+            with autocast(enabled=False,device_type='cuda'):
                 if ln:
                     x_mp = F.layer_norm(x_mp, (x_mp.size(-1),))
                     x_pt = F.layer_norm(x_pt, (x_pt.size(-1),))
                 seq_align_loss = vicreg(x_mp.float(), x_pt.float())
 
                 if pair_mask_flat.any():
-                    y_mp = pep_pair_mp.view(-1, pep_pair_mp.size(-1))[pair_mask_flat]  # [N_pair, Dp]
-                    y_pt = pep_pair_pt.view(-1, pep_pair_pt.size(-1))[pair_mask_flat]
+                    y_mp = pep_pair_mp.reshape(-1, pep_pair_mp.size(-1))[pair_mask_flat]  # [N_pair, Dp]
+                    y_pt = pep_pair_pt.reshape(-1, pep_pair_pt.size(-1))[pair_mask_flat]
                     if ln:
                         y_mp = F.layer_norm(y_mp, (y_mp.size(-1),))
                         y_pt = F.layer_norm(y_pt, (y_pt.size(-1),))

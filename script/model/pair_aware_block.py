@@ -11,18 +11,12 @@ except ImportError:
 from einops import rearrange, repeat
 
 def is_fp16_enabled():
-    # Autocast world
     fp16_enabled = torch.get_autocast_gpu_dtype() == torch.float16
     fp16_enabled = fp16_enabled and torch.is_autocast_enabled()
 
     return fp16_enabled
 
 class Dropout(nn.Module):
-    """
-    Implementation of dropout with the ability to share the dropout mask
-    along a particular dimension.
-    """
-
     def __init__(self, r, batch_dim):
         super(Dropout, self).__init__()
 
@@ -77,16 +71,6 @@ class SelfAttention(nn.Module):
             nn.init.ones_(self.g_proj.bias)
 
     def forward(self, seq_repr, mask=None, bias=None):
-        """
-        Inputs:
-          x: batch of input sequneces (.. x L x C)
-          mask: batch of boolean masks where 1=valid, 0=padding position (.. x L_k). optional.
-          bias: batch of scalar pairwise attention biases (.. x Lq x Lk x num_heads). optional.
-
-        Outputs:
-          sequence projection (B x L x embed_dim), attention maps (B x L x L x num_heads)
-        """
-
         q = rearrange(self.q_proj(seq_repr), "... l (h c) -> ... h l c", h=self.num_heads)
         k = rearrange(self.k_proj(seq_repr), "... l (h c) -> ... h l c", h=self.num_heads)
         v = rearrange(self.v_proj(seq_repr), "... l (h c) -> ... h l c", h=self.num_heads)
@@ -94,11 +78,9 @@ class SelfAttention(nn.Module):
         q = self.rescale_factor * q
         a = torch.einsum("...qc,...kc->...qk", q, k)
 
-        # Add external attention bias.
         if bias is not None:
             a = a + rearrange(bias, "... lq lk h -> ... h lq lk")
 
-        # Do not attend to padding tokens.
         if mask is not None:
             mask = repeat(
                 mask, "... lk -> ... h lq lk", h=self.num_heads, lq=q.shape[-2]
@@ -189,24 +171,13 @@ class TriangleMultiplicativeUpdate(nn.Module):
     def _combine_projections(self, a, b, outgoing):
         if outgoing:
             # out[i,j,d] = sum_k a[i,k,d] * b[j,k,d]
-            b_jkd = b.transpose(1, 2).contiguous()    # [B, j, k, D]
-            out = torch.einsum('bikd, bjkd -> bijd', a, b_jkd)
+            out = torch.einsum('bikd, bjkd -> bijd', a, b)
         else:
             # incoming: out[i,j,d] = sum_k a[k,i,d] * b[k,j,d]
-            a_kid = a.transpose(1, 2).contiguous()      # [B, k, i, D]
-            out = torch.einsum('bkid, bkjd -> bijd', a_kid, b)
+            out = torch.einsum('bkid, bkjd -> bijd', a, b)
         return out
 
     def forward(self, z, mask):
-        """
-        Args:
-            x:
-                [*, N_res, N_res, C_z] input tensor
-            mask:
-                [*, N_res, N_res] input mask 1=valid, 0=padding
-        Returns:
-            [*, N_res, N_res, C_z] output tensor
-        """
         if mask is None:
             mask = z.new_ones(z.shape[:-1])
 
@@ -268,17 +239,16 @@ class TriangleAttention(nn.Module):
             z = z.transpose(1, 2)
             mask = mask.transpose(1, 2)
 
-        # bias terms
-        mask_bias = (self.inf * (mask.to(z.dtype) - 1))[..., None, :,  None, :] # [*, 1, I, 1, J]
-        tri_bias = rearrange(self.w_bias(z), "... i j h -> ... h i 1 j") # [*, H, I, 1, J]
+        mask_bias = (self.inf * (mask.to(z.dtype) - 1))[..., None, :,  None, :] # [*, 1, I, 1, K]
+        tri_bias = rearrange(self.w_bias(z), "... j k h -> ... h 1 j k") # [*, H, 1, J, K]
 
         q = rearrange(self.q_proj(z), "... i j (h c) -> ... h i j c", h=self.num_heads)
-        k = rearrange(self.k_proj(z), "... i j (h c) -> ... h i j c", h=self.num_heads)
-        v = rearrange(self.v_proj(z), "... i j (h c) -> ... h i j c", h=self.num_heads)
+        k = rearrange(self.k_proj(z), "... i k (h c) -> ... h i k c", h=self.num_heads)
+        v = rearrange(self.v_proj(z), "... i k (h c) -> ... h i k c", h=self.num_heads)
 
         q = self.rescale_factor * q
        
-        a = torch.einsum("bhijc,bhikc->bhijk", q, k) #[*, H, I, J, J]
+        a = torch.einsum("bhijc,bhikc->bhijk", q, k) #[*, H, I, J, K]
         a = a + mask_bias + tri_bias
         a = F.softmax(a, dim=-1)
 
@@ -336,16 +306,6 @@ class PairAwareBlock(nn.Module):
         self.col_drop = Dropout(dropout * 2, 1)
 
     def forward(self, seq_repr, pair_repr, mask=None):
-        """
-        Inputs:
-          seq_repr: B x L x d_seq
-          pair_repr: B x L x L x d_pair
-          mask: B x L boolean tensor of valid positions
-
-        Output:
-          seq_repr: B x L x d_seq
-          pair_repr: B x L x L x d_pair
-        """
         assert len(seq_repr.shape) == 3
         assert len(pair_repr.shape) == 4
 

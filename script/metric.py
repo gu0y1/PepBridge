@@ -121,7 +121,6 @@ def binary_evaluate_metrics(y_true, y_pred, mask=None, threshold=0.5, group=None
 
     return _round_metrics_dict(mean_metrics, ndigits=4)
 
-
 def dist_pred_from_logits_np(logits: np.ndarray, bin_centers: np.ndarray):
     """
     logits:      [B, mhc_len, pep_len, K] 

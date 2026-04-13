@@ -50,7 +50,6 @@ class JointEmbedder(nn.Module):
         super().__init__()
         assert n_chains in (2,3), "Only 2 or 3 chains supported in this class."
         self.n_chains = n_chains
-        #self.use_cross_linear = use_cross_linear
 
         self.linear_seq_a = nn.Linear(d_seq, d_seq)
         self.linear_seq_b = nn.Linear(d_seq, d_seq)
@@ -75,6 +74,16 @@ class JointEmbedder(nn.Module):
                 pair_repr_ab=None,  pair_repr_ba=None,
                 pair_repr_bc=None,  pair_repr_cb=None):
         
+        if self.n_chains==3:
+            assert seq_repr_c is not None and pair_repr_c is not None, \
+            "For n_chains=3, seq_repr_c and pair_repr_c are required."
+
+        if self.n_chains==2:
+            if pair_repr_ab is None or pair_repr_ba is None:
+                pair_repr_ab, pair_repr_ba = self.joint_pair(seq_repr_a, seq_repr_b)
+        else:
+            pair_repr_ac, pair_repr_ca = self.joint_pair(seq_repr_a, seq_repr_c)
+
         seq_repr_a = self.linear_seq_a(seq_repr_a)
         seq_repr_b = self.linear_seq_b(seq_repr_b)
         
@@ -82,27 +91,17 @@ class JointEmbedder(nn.Module):
         pair_repr_b = self.linear_pair_b(pair_repr_b)
 
         if self.n_chains==2:
-            if pair_repr_ab is None or pair_repr_ba is None:
-                pair_repr_ab, pair_repr_ba = self.joint_pair(seq_repr_a, seq_repr_b)
             pair_repr = assemble_full_pair2(pair_repr_a, pair_repr_ab,
                                         pair_repr_ba, pair_repr_b)
             seq_repr = torch.cat([seq_repr_a,seq_repr_b],dim=1)
         
-        elif self.n_chains==3:
-            assert seq_repr_c is not None and pair_repr_c is not None, \
-            "For n_chains=3, seq_repr_c and pair_repr_c are required."
+        else:
             seq_repr_c = self.linear_seq_c(seq_repr_c)
             pair_repr_c = self.linear_pair_c(pair_repr_c)
 
-            # if pair_repr_ab is None or pair_repr_ba is None:
-            #     pair_repr_ab, pair_repr_ba = self.joint_pair(seq_repr_a, seq_repr_b)
-            # if pair_repr_bc is None or pair_repr_cb is None:
-            #     pair_repr_bc, pair_repr_cb = self.joint_pair(seq_repr_b, seq_repr_c)
-            pair_repr_ac, pair_repr_ca = self.joint_pair(seq_repr_a, seq_repr_c)
-        
-            # if self.use_cross_linear:
-            assert pair_repr_ab is not None and pair_repr_ab is not None \
+            assert pair_repr_ab is not None and pair_repr_ba is not None \
                 and pair_repr_bc is not None and pair_repr_cb is not None
+            
             pair_repr_ab = self.linear_pair_ab(pair_repr_ab)
             pair_repr_ba = self.linear_pair_ba(pair_repr_ba)
             pair_repr_bc = self.linear_pair_bc(pair_repr_bc)
