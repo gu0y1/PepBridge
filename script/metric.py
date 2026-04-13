@@ -1,12 +1,8 @@
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import roc_auc_score, precision_recall_curve, auc, \
-    accuracy_score, f1_score, precision_score, recall_score, \
-    mean_squared_error, matthews_corrcoef, mean_absolute_percentage_error
+    accuracy_score, f1_score, precision_score, recall_score, matthews_corrcoef
 
 import numpy as np
-
-import torch.nn.functional as F
-import torch
 
 def _round_metrics_dict(d, ndigits=4):
     out = {}
@@ -51,7 +47,6 @@ def _binary_metrics_on_flat(y_true_flat, y_pred_flat, threshold=0.5):
     }
     return _round_metrics_dict(metrics, ndigits=4)
 
-
 def binary_evaluate_metrics(y_true, y_pred, mask=None, threshold=0.5, group=None, mean=False):
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
@@ -88,7 +83,7 @@ def binary_evaluate_metrics(y_true, y_pred, mask=None, threshold=0.5, group=None
     if group is None:
         return _binary_metrics_on_flat(y_true_flat, y_pred_flat, threshold)
 
-    group = np.asarray(group)
+    group = np.asarray(group).astype(str)
     if group.shape != y_true.shape:
         raise ValueError(
             f"group.shape={group.shape} y_true.shape={y_true.shape}"
@@ -197,52 +192,3 @@ def distance_evaluate_metrics(y_true, y_pred, mask, eps=1e-8, distogram=False):
         "Spearman": np.nanmean(spea_list),
     }
     return _round_metrics_dict(metrics, ndigits=4)
-
-def bertscore(seq_emb, cand_emb, ref_mask, cand_mask):
-    """
-    seq_emb:  [B, Lr, D]  # reference
-    cand_emb: [B, Lc, D]  # candidate
-    ref_mask:  [B, Lr]    # 1=valid, 0=pad
-    cand_mask: [B, Lc]    # 1=valid, 0=pad
-    """
-    cand_norm = F.normalize(cand_emb, dim=-1)   # [B, Lc, D]
-    ref_norm  = F.normalize(seq_emb, dim=-1)    # [B, Lr, D]
-
-    sim = torch.matmul(cand_norm, ref_norm.transpose(1, 2))   # [B, Lc, Lr]
-
-    sim = sim.masked_fill(cand_mask.unsqueeze(-1) == 0, -1e4)
-    sim = sim.masked_fill(ref_mask.unsqueeze(1) == 0, -1e4)
-
-    prec_tok = sim.max(dim=2).values                # [B, Lc]
-    prec = (prec_tok * cand_mask).sum(dim=1) / cand_mask.sum(dim=1).clamp_min(1.0)
-
-    rec_tok = sim.max(dim=1).values                 # [B, Lr]
-    rec = (rec_tok * ref_mask).sum(dim=1) / ref_mask.sum(dim=1).clamp_min(1.0)
-
-    f1 = 2 * prec * rec / (prec + rec + 1e-8)       # [B]
-    return f1
-
-def perplexity_per_sample(logits, labels, pad_id):
-    """
-    logits: [B, L, V]
-    labels: [B, L]
-    return: [B] 的每条样本 perplexity
-    """
-    B, L, V = logits.shape
-
-    logits_flat = logits.view(B * L, V)      # [B*L, V]
-    labels_flat = labels.view(B * L)         # [B*L]
-
-    loss_tok = F.cross_entropy(
-        logits_flat,
-        labels_flat,
-        ignore_index=pad_id,
-        reduction="none"                     # [B*L]
-    ).view(B, L)                            
-
-    mask = (labels != pad_id).float()        # [B, L]
-    tok_per_seq = mask.sum(1).clamp_min(1.0) 
-
-    loss_per_sample = (loss_tok * mask).sum(1) / tok_per_seq   # [B]
-    ppl_per_sample = torch.exp(loss_per_sample)                # [B]
-    return ppl_per_sample

@@ -30,6 +30,31 @@ def mk_bv_dict():
         'TRBVB': 72, 'TRBV6-3': 73, 'TRBV3-2':74, 'TRBVA/OR9-2':75, 'TRBV25/OR9-2':76, '[UNK]':77
     }
     return bv_dict
+  
+def mk_av_dict():
+    av_dict = {
+        '[PAD]': 0,'TRAV1-1': 1,'TRAV1-2': 2,'TRAV10': 3,'TRAV11': 4,'TRAV12-1': 5,'TRAV12-2': 6,'TRAV12-3': 7,'TRAV13-1': 8,'TRAV13-2': 9,
+        'TRAV14/DV4': 10,'TRAV15': 11,'TRAV16': 12,'TRAV17': 13,'TRAV18': 14,'TRAV19': 15,'TRAV2': 16,'TRAV20': 17,'TRAV21': 18,
+        'TRAV22': 19,'TRAV23/DV6': 20,'TRAV24': 21,'TRAV25': 22,'TRAV26-1': 23,'TRAV26-2': 24,'TRAV27': 25,'TRAV28': 26,
+        'TRAV29/DV5': 27,'TRAV3': 28,'TRAV30': 29,'TRAV31': 30,'TRAV32': 31,'TRAV33': 32,'TRAV34': 33,'TRAV35': 34,
+        'TRAV36/DV7': 35,'TRAV37': 36,'TRAV38-1': 37,'TRAV38-2/DV8': 38,'TRAV39': 39,'TRAV4': 40,'TRAV40': 41,
+        'TRAV41': 42,'TRAV5': 43,'TRAV6': 44,'TRAV7': 45,'TRAV8-1': 46,'TRAV8-2': 47,'TRAV8-3': 48,
+        'TRAV8-4': 49,'TRAV8-5': 50,'TRAV8-6': 51,'TRAV8-7': 52,'TRAV9-1': 53,'TRAV9-2': 54, '[UNK]':55
+    }
+    return av_dict
+
+def mk_aj_dict():
+    aj_dict = {
+        '[PAD]': 0,'TRAJ1': 1,'TRAJ10': 2,'TRAJ11': 3,'TRAJ12': 4,'TRAJ13': 5,'TRAJ14': 6,'TRAJ15': 7,'TRAJ16': 8,
+        'TRAJ17': 9,'TRAJ18': 10,'TRAJ19': 11,'TRAJ2': 12,'TRAJ20': 13,'TRAJ21': 14,'TRAJ22': 15,'TRAJ23': 16,
+        'TRAJ24': 17,'TRAJ25': 18,'TRAJ26': 19,'TRAJ27': 20,'TRAJ28': 21,'TRAJ29': 22,'TRAJ3': 23,'TRAJ30': 24,
+        'TRAJ31': 25,'TRAJ32': 26,'TRAJ33': 27,'TRAJ34': 28,'TRAJ35': 29,'TRAJ36': 30,'TRAJ37': 31,'TRAJ38': 32,
+        'TRAJ39': 33,'TRAJ4': 34,'TRAJ40': 35,'TRAJ41': 36,'TRAJ42': 37,'TRAJ43': 38,'TRAJ44': 39,'TRAJ45': 40,
+        'TRAJ46': 41,'TRAJ47': 42,'TRAJ48': 43,'TRAJ49': 44,'TRAJ5': 45,'TRAJ50': 46,'TRAJ51': 47,'TRAJ52': 48,
+        'TRAJ53': 49,'TRAJ54': 50,'TRAJ55': 51,'TRAJ56': 52,'TRAJ57': 53,'TRAJ58': 54,'TRAJ59': 55,'TRAJ6': 56,
+        'TRAJ60': 57,'TRAJ61': 58,'TRAJ7': 59,'TRAJ8': 60,'TRAJ9': 61, '[UNK]':62
+    }
+    return aj_dict
 
 def load_mhc_dict(mhc_type, pseudo=True):
     current_dir = os.path.dirname(__file__)
@@ -141,7 +166,7 @@ def replace_masked_tokens(token_ids, candidate_positions, num_mlm_preds, vocab_d
     if random.random() < contiguous_prob:
         pred_positions = _sample_contiguous_segment(candidate_positions, num_mlm_preds)
     else:
-        cand = list(candidate_positions)    # 避免就地修改
+        cand = list(candidate_positions)   
         random.shuffle(cand)
         pred_positions = set(cand[:num_mlm_preds])
 

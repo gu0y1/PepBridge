@@ -10,7 +10,7 @@ from collections import defaultdict, Counter, deque
 from typing import List, Sequence, Hashable, Optional
 
 from .dataprocess import mk_aa_dict, mk_bv_dict, load_mhc_dict,\
-    aa_to_vec, pad_1d, pad_2d, get_masked_sample, mhc_to_aa, mhc_to_esm
+    aa_to_vec, pad_1d, pad_2d, get_masked_sample, mhc_to_aa, mhc_to_esm, mk_aj_dict, mk_av_dict
 from .utils import read_csv_with_index_allow_duplicate_names
 
 class MaskedLMDataSet(Dataset):
@@ -358,12 +358,11 @@ class MPTDataSet(Dataset):
 
     return out, idx  
 
-class MPTGenDataSet(Dataset):
+
+class MPTFineTuneDataSet(Dataset):
   def __init__(self, mpt_df, mhc_type, 
                mhc_max_len, pep_max_len, cdr3_max_len,
-               bv=False, pos=False, real=False,
-               distillation=False,
-               pep_mask=0.1, cdr3_mask=0.1):
+               bv=False, av=False, aj=False, score=None):
     self.df = mpt_df
     self.mhc_type = mhc_type
 
@@ -371,16 +370,15 @@ class MPTGenDataSet(Dataset):
     self.cdr3_max_len = cdr3_max_len
     self.pep_max_len = pep_max_len
 
-    self.pos = pos
-    self.real = real
     self.bv = bv
-    self.distillation = distillation
-
-    self.pep_mask = pep_mask
-    self.cdr3_mask = cdr3_mask
+    self.av = av
+    self.aj = aj
+    self.score = score
 
     self.aa_dict = mk_aa_dict()
     self.bv_dict = mk_bv_dict()
+    self.av_dict = mk_av_dict()
+    self.aj_dict = mk_aj_dict()
     self.pseudo_mhc_dict = load_mhc_dict(mhc_type, pseudo=True)
     self.esm_mhc_dict = load_mhc_dict(mhc_type, pseudo=False)
 
@@ -393,7 +391,7 @@ class MPTGenDataSet(Dataset):
     row = self.df.iloc[idx]
     mhc_name = row['MHC']
     pep_seq  = row['peptide']
-    cdr3_seq = row['cdr3_neg']
+    cdr3_seq = row['cdr3']
 
     mhc_seq = mhc_to_aa(mhc_name, self.pseudo_mhc_dict)        # str
     mhc_ids = aa_to_vec(mhc_seq, self.aa_dict)                 # 1D ids
@@ -402,318 +400,41 @@ class MPTGenDataSet(Dataset):
     esm_mhc = mhc_to_esm(mhc_name, self.esm_mhc_dict) 
 
     pep_ids = aa_to_vec(pep_seq, self.aa_dict)
-    if self.pep_mask is not None and random.random() < self.pep_mask:
-      pep_ids,_ = get_masked_sample(pep_ids, self.aa_dict, 0.10, 0)
     pep_ids = pad_1d(pep_ids, self.pep_max_len, pad_value=0, dtype=int)
 
     cdr3_ids = aa_to_vec(cdr3_seq, self.aa_dict)
-    if self.cdr3_mask is not None and random.random() < self.cdr3_mask:
-      cdr3_ids,_ = get_masked_sample(cdr3_ids, self.aa_dict, 0.10, 0)
     cdr3_ids = pad_1d(cdr3_ids, self.cdr3_max_len, pad_value=0, dtype=int)
 
     out = {
        'mhc': torch.as_tensor(mhc_ids, dtype=torch.long),
         'peptide': torch.as_tensor(pep_ids, dtype=torch.long),
-        'neg_cdr3': torch.as_tensor(cdr3_ids, dtype=torch.long),
+        'cdr3': torch.as_tensor(cdr3_ids, dtype=torch.long),
         'esm_mhc': torch.as_tensor(esm_mhc, dtype=torch.float32)
     }
 
-    if self.pos:
-        pos_cdr3 = row['cdr3_pos']
-        pos_cdr3 = aa_to_vec(pos_cdr3, self.aa_dict)
-        pos_cdr3 = pad_1d(pos_cdr3, self.cdr3_max_len, pad_value=0, dtype=int)
-        out['pos_cdr3'] = torch.tensor(pos_cdr3, dtype=torch.long)
-        if self.bv:
-            bv_name = row['bv_pos']
-            out['pos_bv'] = torch.tensor(self.bv_dict.get(bv_name, 0), 
-                                         dtype=torch.long)
+    if self.bv:
+        bv_name = row['trbv']
+        out['trbv'] = torch.tensor(self.bv_dict.get(bv_name, 0), dtype=torch.long)
 
-    if self.real:
-        real_cdr3 = row['cdr3_real']
-        real_cdr3 = aa_to_vec(real_cdr3, self.aa_dict)
-        real_cdr3 = pad_1d(real_cdr3, self.cdr3_max_len, pad_value=0, dtype=int)
-        out['real_cdr3'] = torch.tensor(real_cdr3, dtype=torch.long)
-        if self.bv:
-            bv_name = row['bv_real']
-            out['real_bv'] = torch.tensor(self.bv_dict.get(bv_name, 0), 
-                                         dtype=torch.long)
-            
-    if self.distillation:
-        out['score'] = torch.tensor(float(row['score']), 
-                                    dtype=torch.float32)
+    if self.av:
+        av_name = row['trav']
+        out['trav'] = torch.tensor(self.av_dict.get(av_name, 0), dtype=torch.long)
+
+    if self.aj:
+        aj_name = row['traj']
+        out['traj'] = torch.tensor(self.aj_dict.get(aj_name, 0), dtype=torch.long)
+
+    if self.score is not None:
+        out['score'] = torch.tensor(float(row[self.score]), dtype=torch.float32)
 
     return out, idx  
-  
-def rfs_repeat_factors(counts, t=1e-3):
-  freqs = counts / counts.sum()
-  return np.maximum(1.0, np.sqrt(t / np.clip(freqs, 1e-12, None)))
-
-def mixed_group_probs_from_rfs(rfs, alpha=1, mix=0.1):
-  p = rfs**alpha
-  p = p / p.sum()
-  mix = 0.10                         
-  p = (1 - mix) * p + mix * (1.0 / len(p))
-  return p 
-
-class QuotaGroupedBatchSampler(Sampler[List[int]]):
-    """
-    - epoch 级：按给定组概率 p_g -> 整数配额 q_g（随机四舍五入），生成无放回的“组日程表”
-    - batch 级：每批选多个不同组；组内不放回最多取 max_per_group 个样本
-    - 防记忆化：sample_repeat_cap 限制每样本在一个 epoch 内的出现次数
-    - 健壮性：绝不产出空 batch；当某组被 cap 用尽时自动跳过并回填
-    """
-    def __init__(self,
-                 peptide_ids: Sequence[Hashable],
-                 probs: np.ndarray,
-                 batch_size: int,
-                 max_per_group: int = 2,
-                 num_batches: Optional[int] = None,
-                 sample_repeat_cap: Optional[int] = 3,
-                 seed: Optional[int] = None):
-        self.batch_size = int(batch_size)
-        self.max_per_group = int(max_per_group)
-        self.sample_repeat_cap = sample_repeat_cap
-        self.rng = random.Random(seed)
-
-        # 分桶：gid -> indices（与 dataset 索引对齐）
-        groups = defaultdict(list)
-        for idx, gid in enumerate(peptide_ids):
-            groups[int(gid)].append(idx)   # 强制 int，避免 np.int64 做 dict key 时混淆
-        self.group_keys = list(groups.keys())               # [0..P-1]
-        self.groups = {g: list(v) for g, v in groups.items()}
-        self.P = len(self.group_keys)
-
-        N = len(peptide_ids)
-        if num_batches is None:
-            num_batches = math.ceil(2 * N / self.batch_size)
-        self.num_batches = int(num_batches)
-        # 每批最多可容纳的“不同组”的个数
-        self.groups_per_batch = max(1, self.batch_size // self.max_per_group)
-
-        # 归一化组概率
-        p = np.asarray(probs, dtype=np.float64)
-        self.p = p / p.sum()
-
-    def __len__(self):
-        return self.num_batches
-
-    def _make_epoch_schedule(self,
-                            u_share: float = 0.20,     # 20% 均匀地板
-                            cap_mult: float = 2.0):    # 最高不超过 2× 平均
-        P = len(self.group_keys)
-        T = self.num_batches * self.groups_per_batch
-        p = self.p / self.p.sum()
-
-        # --- (a) 均匀“地板” ---
-        Tu = int(round(u_share * T))
-        q = np.zeros(P, dtype=int)
-        q_per = Tu // P
-        q[:] = q_per
-        rem = Tu - q_per * P
-        if rem > 0:                               # 把剩余的 +1 随机分到 rem 个组
-            add_idx = np.random.choice(P, size=rem, replace=False)
-            q[add_idx] += 1
-
-        # --- (b) 概率配额（剩余部分） + 无偏随机四舍五入 ---
-        Tb = T - q.sum()
-        if Tb > 0:
-            exp_q = Tb * p
-            base = np.floor(exp_q).astype(int)
-            need = Tb - base.sum()
-            if need > 0:
-                probs = exp_q - base
-                if probs.sum() > 0:
-                    take = np.random.choice(P, size=need, replace=False, p=probs/probs.sum())
-                else:
-                    take = np.random.choice(P, size=need, replace=False)
-                base[take] += 1
-            q += base
-
-        # --- (c) 天花板 + 水位填充再分配 ---
-        cap = int(np.ceil(cap_mult * T / P))
-        overflow = (q - cap).clip(min=0)
-        q[q > cap] = cap
-        leftover = int(overflow.sum())
-        if leftover > 0:
-            # 仅在未达 cap 的组中按 p 再分配
-            mask = (q < cap)
-            while leftover > 0 and mask.any():
-                alloc = np.minimum(leftover, mask.sum())
-                probs = np.where(mask, p, 0.0)
-                probs_sum = probs.sum()
-                if probs_sum == 0:
-                    idx = np.random.choice(np.where(mask)[0], size=alloc, replace=False)
-                else:
-                    idx = np.random.choice(P, size=alloc, replace=False, p=probs/probs_sum)
-                q[idx] += 1
-                leftover -= alloc
-                mask = (q < cap)
-
-        # --- (d) 展开为 schedule 并打乱 ---
-        schedule = []
-        for i, qi in enumerate(q):
-            if qi > 0:
-                schedule.extend([i] * int(qi))
-        self.rng.shuffle(schedule)
-
-        # 可选：存调试信息
-        self.last_quota_vec = q.copy()
-        self.last_T = int(T)
-        return schedule
-    
-
-    def _build_group_queues(self):
-        q = {}
-        for gi, g in enumerate(self.group_keys):
-            pool = list(self.groups[g])
-            self.rng.shuffle(pool)
-            q[gi] = deque(pool)
-        return q
-
-    def __iter__(self):
-        schedule = self._make_epoch_schedule()
-        used = Counter()
-
-        P = len(self.group_keys)
-        # 每组剩余“样本预算”（cap * 组内样本数）；None 表示无限
-        if self.sample_repeat_cap is None:
-            group_remaining = np.full(P, np.inf, dtype=float)
-        else:
-            group_remaining = np.array([
-                int(self.sample_repeat_cap) * len(self.groups[self.group_keys[gi]])
-                for gi in range(P)
-            ], dtype=float)
-
-        # 每组还可被“命中”的配额（来自 schedule 的整数配额，防止某组过多命中）
-        if hasattr(self, "last_quota_vec"):
-            hit_quota = self.last_quota_vec.astype(int).copy()
-        else:
-            # 没存的话，就当无限配额（不推荐，但兼容）
-            hit_quota = np.full(P, np.iinfo(np.int32).max, dtype=int)
-
-        hit_count = np.zeros(P, dtype=int)  # 已命中次数（用于不超过配额）
-        queues = self._build_group_queues()
-        ptr = 0
-        batches = 0
-
-        # 便捷函数：按“还活着 & 本批未选”的组重抽一个 gi
-        def draw_replacement(exclude_set):
-            alive = np.where((group_remaining > 0) & (hit_count < hit_quota))[0]
-            if exclude_set:
-                alive = np.array([x for x in alive if x not in exclude_set], dtype=int)
-            if alive.size == 0:
-                return None
-            probs = self.p[alive].astype(float)
-            probs /= probs.sum()
-            return int(np.random.choice(alive, p=probs))
-
-        while batches < self.num_batches:
-            batch = []
-            chosen_gset = set()
-
-            while len(batch) < self.batch_size:
-                if len(chosen_gset) >= self.groups_per_batch:
-                    break
-
-                # 先按 schedule 取一个候选 gi
-                gi = None
-                while ptr < len(schedule):
-                    cand = schedule[ptr]; ptr += 1
-                    if cand in chosen_gset:
-                        continue
-                    gi = cand
-                    break
-
-                # schedule 用尽，尝试在线重抽
-                if gi is None:
-                    gi = draw_replacement(chosen_gset)
-                    if gi is None:
-                        break  # 没有可用组了
-
-                # 若该组已无预算或配额用尽，在线重抽
-                if group_remaining[gi] <= 0 or hit_count[gi] >= hit_quota[gi]:
-                    gi = draw_replacement(chosen_gset)
-                    if gi is None:
-                        break
-
-                # —— 组内取样（队列轮转 + 小组单条/批）——
-                gkey = self.group_keys[gi]
-                q = queues[gi]
-
-                # 小组单条/批：n_g ≤ 2 则本批最多取 1 条
-                n_g = len(self.groups[gkey])
-                per_batch_take = 2 if n_g <= 2 else self.max_per_group
-
-                take = min(per_batch_take, self.batch_size - len(batch))
-                if not np.isinf(group_remaining[gi]):
-                    take = min(take, int(group_remaining[gi]))
-
-                got = []
-                tries = 0
-                # 轮转：从队头拿，达 cap 的样本丢弃，不再放回
-                while len(got) < take and len(q) > 0 and tries < 2 * len(q):
-                    idx = q.popleft(); tries += 1
-                    if self.sample_repeat_cap is not None and used[idx] >= self.sample_repeat_cap:
-                        # 达 cap：永久移出队列
-                        continue
-                    got.append(idx)
-                    used[idx] += 1
-                    q.append(idx)  # 放回队尾，保证先覆盖再复用
-
-                if len(got) == 0:
-                    # 该组当前拿不到样本；换一个组
-                    gi2 = draw_replacement(chosen_gset)
-                    if gi2 is None:
-                        break
-                    gi = gi2
-                    continue
-
-                # 记录命中与预算扣减
-                hit_count[gi] += 1
-                group_remaining[gi] -= len(got)
-                batch.extend(got)
-                chosen_gset.add(gi)
-
-            if len(batch) == 0:
-                break  # 绝不 yield 空批
-
-            batches += 1
-            yield batch
-
-def build_loader_for_long_tail(dataset, peptide_ids, t=1e-3,
-                               batch_size=128, max_per_group=2,
-                               alpha=1, mix=0.1, repeat_cap=4, seed=42,
-                               num_workers=4, pin_memory=True):
-    peps = np.asarray(peptide_ids)
-    uniq, inv = np.unique(peps, return_inverse=True)
-    counts = np.bincount(inv)
-    rfs = rfs_repeat_factors(counts,t)
-    probs  = mixed_group_probs_from_rfs(rfs, alpha=alpha, mix=mix)
-
-    sampler = QuotaGroupedBatchSampler(
-        peptide_ids=inv,     
-        probs=probs,
-        batch_size=batch_size,
-        max_per_group=max_per_group,
-        sample_repeat_cap=repeat_cap,
-        seed=seed
-    )
-
-    return DataLoader(dataset, batch_sampler=sampler,
-                      num_workers=num_workers, pin_memory=pin_memory)
 
 class UniformPeptideBatchSampler(Sampler[List[int]]):
-    """
-    每个 epoch：将所有 peptide(组)打乱 -> 按 peptides_per_step 分块。
-    每 step：从块内每个 peptide 抽 samples_per_peptide 条样本，组成一个 batch。
-    - ensure_full_batch=True: 组样本不足时循环取，保证批尺寸稳定
-    - set_epoch(epoch) 可用于每轮不同随机序
-    """
     def __init__(self,
                  peptide_ids: Sequence[Hashable],
                  *,
-                 peptides_per_step: int,        # 每步抽多少个不同 peptide
-                 samples_per_peptide: int = 2,   # 每个 peptide 取几条
+                 peptides_per_step: int,        
+                 samples_per_peptide: int = 2, 
                  seed: Optional[int] = None,
                  ensure_full_batch: bool = True):
         self.peptides_per_step = int(peptides_per_step)
@@ -722,12 +443,11 @@ class UniformPeptideBatchSampler(Sampler[List[int]]):
         self.base_seed = 0 if seed is None else int(seed)
         self._epoch = 0
 
-        # 分组：gid -> 样本索引列表
         groups = defaultdict(list)
         for idx, gid in enumerate(peptide_ids):
-            groups[gid].append(idx)          # 不做 int() 强转
-        self.group_keys = list(groups.keys())           # 组ID列表（可能是字符串）
-        self.groups = {g: list(v) for g, v in groups.items()}  # 仍用原始ID做key
+            groups[gid].append(idx)         
+        self.group_keys = list(groups.keys())          
+        self.groups = {g: list(v) for g, v in groups.items()} 
         self.P = len(self.group_keys)
 
         if self.peptides_per_step <= 0:
@@ -735,7 +455,6 @@ class UniformPeptideBatchSampler(Sampler[List[int]]):
         if self.samples_per_peptide <= 0:
             raise ValueError("samples_per_peptide must be > 0")
 
-        # 预计算 epoch 内 step 数
         self.num_steps = math.ceil(self.P / self.peptides_per_step)
 
     def __len__(self):
@@ -750,21 +469,17 @@ class UniformPeptideBatchSampler(Sampler[List[int]]):
     def __iter__(self):
         rng = self._rng()
 
-        # 1) 打乱所有 peptide
         order = list(range(self.P))
         rng.shuffle(order)
 
-        # 2) 为每个 peptide 建立一个打乱的循环队列（组内轮转，先覆盖再复用）
         queues: dict[int, deque] = {}
         for gi, gkey in enumerate(self.group_keys):
             pool = list(self.groups[gkey])
             rng.shuffle(pool)
             queues[gi] = deque(pool)
 
-        # 3) 按块产出 batch
         ptr = 0
         for _ in range(self.num_steps):
-            # 本步选出的 peptide 索引（在 group_keys 内的下标）
             chunk = order[ptr: ptr + self.peptides_per_step]
             ptr += self.peptides_per_step
 
@@ -777,29 +492,22 @@ class UniformPeptideBatchSampler(Sampler[List[int]]):
                 taken = []
 
                 if m == 0:
-                    # 该组没有样本（极端情况），跳过
                     continue
 
-                # 组内轮转：尽量不重复；若样本不足且 ensure_full_batch=True 则循环补齐
-                # 先取最多不重复的
                 k = min(need, m)
                 for _ in range(k):
                     idx = q.popleft()
                     taken.append(idx)
-                    q.append(idx)   # 放回队尾，保证轮转
+                    q.append(idx)  
 
-                # 若不足且需要稳定批大小，则循环补齐（允许同批重复）
                 if self.ensure_full_batch and len(taken) < need:
-                    # 再次从队头循环拿到 need
                     for _ in range(need - len(taken)):
-                        idx = q[0]         # 看队头
+                        idx = q[0]      
                         taken.append(idx)
-                        q.rotate(-1)       # 轮转
+                        q.rotate(-1)      
 
-                # 若不要求稳定批大小，则保留 len(taken) < need 的情况
                 batch.extend(taken)
 
-            # 允许最后一个 batch 不满（当 P 不是 peptides_per_step 的整数倍时）
             if len(batch) == 0:
                 break
             yield batch
@@ -820,112 +528,3 @@ def build_loader_uniform_by_peptide(dataset, peptide_ids,
     )
     return DataLoader(dataset, batch_sampler=sampler,
                       num_workers=num_workers, pin_memory=pin_memory)
-
-# def validate_sampler_epoch(pt_loader, inv, *, batch_size, max_per_group, sample_repeat_cap=None):
-#     """
-#     pt_loader: DataLoader 返回 (out, idx)；idx 是样本索引 1D tensor
-#     inv: 长度 N 的数组，把每个样本索引映射到 peptide 组ID（np.unique(..., return_inverse=True) 得到的 inv）
-#     """
-#     N = len(inv)
-#     P = int(inv.max()) + 1
-
-#     sample_repeats = np.zeros(N, dtype=np.int64)   # 每个样本本epoch被抽次数
-#     group_hits = np.zeros(P, dtype=np.int64)       # 每个组在多少个batch里出现过（命中次数）
-#     empty_batches = 0
-#     bad_batches = []
-
-#     for step, (out, idx_tensor) in enumerate(pt_loader):
-#         idx = idx_tensor.detach().cpu().numpy().astype(int)
-#         if idx.size == 0:
-#             empty_batches += 1
-#             continue
-
-#         # 统计这个 batch 内各组的样本数
-#         g = inv[idx]
-#         uniq_g, cnt_g = np.unique(g, return_counts=True)
-#         # (2) 每个 batch 内每组样本数 ≤ max_per_group
-#         if (cnt_g > max_per_group).any():
-#             bad_batches.append((step, uniq_g[cnt_g > max_per_group].tolist(),
-#                                       cnt_g[cnt_g > max_per_group].tolist()))
-
-#         # (3) 样本重复上限（跨 batch 汇总）
-#         sample_repeats[idx] += 1
-
-#         # (4) 组命中（这个 batch 里出现过就算 1 次）
-#         group_hits[uniq_g] += 1
-
-#     # 汇总检查
-#     report = {}
-
-#     # (1) 空 batch
-#     report['empty_batches'] = int(empty_batches)
-
-#     # (2) 违反 per-group-per-batch 上限
-#     report['violated_batches'] = bad_batches[:5]  # 只显示前几条
-#     report['violated_batches_count'] = len(bad_batches)
-
-#     # (3) 样本重复上限
-#     if sample_repeat_cap is not None:
-#         over_cap = np.where(sample_repeats > sample_repeat_cap)[0]
-#         report['over_cap_count'] = int(over_cap.size)
-#         report['max_sample_repeats'] = int(sample_repeats.max())
-#     else:
-#         report['max_sample_repeats'] = int(sample_repeats.max())
-
-#     # (5) EPS 分布（真实值）
-#     # 先把每个样本的重复次数按组聚合，得到每组的“每样本重复次数”的均值/分位
-#     eps_by_group = defaultdict(list)
-#     for s_idx, rep in enumerate(sample_repeats):
-#         eps_by_group[int(inv[s_idx])].append(int(rep))
-#     # 全体样本 EPS 分布
-#     eps_all = sample_repeats[sample_repeats > 0]  # 没出现过的样本不计入
-#     if eps_all.size > 0:
-#         q = np.percentile(eps_all, [50, 90, 95, 99])
-#         report['EPS_all'] = {'P50': float(q[0]), 'P90': float(q[1]),
-#                              'P95': float(q[2]), 'P99': float(q[3]),
-#                              'max': int(eps_all.max())}
-#     else:
-#         report['EPS_all'] = None
-
-#     # (4) 组出场次数的统计
-#     qg = np.percentile(group_hits[group_hits > 0], [50, 90, 95]) if (group_hits > 0).any() else [0, 0, 0]
-#     report['group_hits_summary'] = {
-#         'nonzero_groups': int((group_hits > 0).sum()),
-#         'P50': float(qg[0]),
-#         'P90': float(qg[1]),
-#         'P95': float(qg[2]),
-#         'max': int(group_hits.max())
-#     }
-
-#     return report, sample_repeats, group_hits
-# peps = np.asarray(pt_df.peptide)
-# uniq, inv = np.unique(peps, return_inverse=True)
-
-# # 跑一个 epoch 后（或只迭代一次完整 loader）
-# report, sample_repeats, group_hits = validate_sampler_epoch(
-#     pt_loader, inv,
-#     batch_size=128,
-#     max_per_group=2,
-#     sample_repeat_cap=4
-# )
-
-# print(report)
-
-# peptide_repeat_counts = np.bincount(inv, weights=sample_repeats)
-# df = pd.DataFrame({
-#     "peptide": uniq,
-#     "repeats": peptide_repeat_counts
-# })
-
-# x = np.asarray(peptide_repeat_counts)
-# x_pos = x[x > 0]
-# if x_pos.size > 0:
-#     bins = np.logspace(np.log10(100), np.log10(x_pos.max()), 80)
-#     plt.figure()
-#     plt.hist(x_pos, bins=bins, density=True)
-#     plt.xscale("log")
-#     plt.xlabel("Total repeats per peptide (log scale)")
-#     plt.ylabel("Density")
-#     plt.title("Distribution (log-x)")
-#     plt.tight_layout()
-#     plt.show()
