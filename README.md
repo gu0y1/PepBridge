@@ -19,7 +19,7 @@ This repository provides the model code, inference pipeline, and training utilit
 ## Model framework
 
 <p align="center">
-  <img src="doc/figure1.png" alt="PepBridge framework" width="400">
+  <img src="doc/figure1.png" alt="PepBridge framework" width="500">
 </p>
 
 ---
