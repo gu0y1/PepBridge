@@ -490,7 +490,7 @@ def save_contact_result(df, out_dict, out_dir, task, logger, save_dist=True, kee
 # main
 # -----------------------------
 if __name__ == "__main__":
-    BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    BASE = os.path.abspath(os.path.dirname(__file__))
     logger = setup_logger()
 
     cli_args = parse_kv_args(sys.argv)
