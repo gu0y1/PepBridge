@@ -33,7 +33,7 @@ if __name__ == "__main__":
     aj_dict = mk_aj_dict()
 
     logger = setup_logger()
-    device = 'cuda'
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     cli_args = parse_kv_args(sys.argv)
 

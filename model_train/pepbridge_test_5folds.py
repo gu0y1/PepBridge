@@ -211,7 +211,7 @@ if __name__ == "__main__":
     data_path = cli_args.get("data_path", BASE)
     DATA = os.path.join(data_path, "data")
 
-    default_ckpt_path = os.path.join(BASE, "checkpoints_multi_lora_align3_ln/")
+    default_ckpt_path = os.path.join(BASE, "doc", "checkpoints_multi_lora_align3_ln")
     paths_arg = cli_args.get("paths", None)
     if paths_arg:
         raw_paths = [p.strip() for p in paths_arg.split(",") if p.strip()]
@@ -229,7 +229,7 @@ if __name__ == "__main__":
     aa_dict = mk_aa_dict()
     bv_dcit = mk_bv_dict()
 
-    device = 'cuda'
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     models = []
 
     for p in ckpt_paths:
