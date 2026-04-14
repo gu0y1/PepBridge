@@ -197,100 +197,6 @@ class PTDataSet(Dataset):
       out['contact_pt_dist'] = torch.as_tensor(contact_dist, dtype=torch.float32)
       out['contact_pt_bin'] = torch.as_tensor(contact_prob, dtype=torch.float32)
     return out, idx  
-  
-class MultiNegPairPTDataset(Dataset):
-    def __init__(self, pt_df, pep_max_len, cdr3_max_len,
-                 hard_neg_map,
-                 k_cross=8, k_hard=2,
-                 pep_mask=None, cdr3_mask=None,
-                 avoid_duplicates=True):
-        self.df = pt_df.reset_index(drop=True)
-        self.pep_max_len = int(pep_max_len)
-        self.cdr3_max_len = int(cdr3_max_len)
-        self.k_cross = int(k_cross)
-        self.k_hard = int(k_hard)
-        self.k_total = self.k_cross + self.k_hard
-        self.pep_mask = pep_mask
-        self.cdr3_mask = cdr3_mask
-        self.avoid_duplicates = bool(avoid_duplicates)
-
-        self.hard_neg_map = {str(k): list(v) for k, v in dict(hard_neg_map).items()}
-
-        self.aa_dict = mk_aa_dict()
-
-        pos_by_pep = defaultdict(set)
-        for _, row in self.df.iterrows():
-            pep = row['peptide']
-            cpos = row['cdr3']
-            if isinstance(pep, str) and isinstance(cpos, str) and pep and cpos:
-                pos_by_pep[pep].add(cpos)
-        all_pos = set()
-        for s in pos_by_pep.values(): all_pos |= s
-
-        cross_pool_by_pep = {}
-        for pep, s in pos_by_pep.items():
-            cross_pool_by_pep[pep] = list(all_pos - s)
-
-        self.pos_by_pep = {k: list(v) for k, v in pos_by_pep.items()}
-        self.cross_pool_by_pep = cross_pool_by_pep
-        self.global_pos_pool = list(all_pos)
-
-    def __len__(self):
-        return len(self.df)
-
-    # --- utils ---
-    def _encode_seq(self, seq, max_len, mask_prob=None):
-        ids = aa_to_vec(seq, self.aa_dict)
-        if (mask_prob is not None) and (random.random() < mask_prob):
-            ids, _ = get_masked_sample(ids, self.aa_dict, 0.10, 0)
-        ids = pad_1d(ids, max_len, pad_value=0, dtype=int)
-        return torch.as_tensor(ids, dtype=torch.long)
-
-    def _sample_unique_or_choices(self, pool_list, k, ban_set=None):
-        if ban_set:
-            pool = [x for x in pool_list if x not in ban_set]
-        else:
-            pool = list(pool_list)
-
-        picked = []
-        if self.avoid_duplicates and len(pool) >= k:
-            picked = random.sample(pool, k)
-        else:
-            if len(pool) == 0:
-                return picked
-            while len(picked) < k:
-                picked.append(random.choice(pool))
-        return picked[:k]
-
-    def __getitem__(self, idx):
-        row = self.df.iloc[idx]
-        pep = row['peptide']
-        cdr3_pos_seq = row['cdr3']
-
-        cross_pool = self.cross_pool_by_pep.get(pep, self.global_pos_pool)
-        ban = set(self.pos_by_pep.get(pep, [])) | {cdr3_pos_seq}
-        neg_cross = self._sample_unique_or_choices(cross_pool, self.k_cross, ban_set=ban)
-
-        key = pep + "||" + cdr3_pos_seq
-        hard_list = self.hard_neg_map.get(key, [])
-        neg_hard = self._sample_unique_or_choices(hard_list, self.k_hard, ban_set=ban)
-
-        neg_list = list(neg_cross) + list(neg_hard)
-        if len(neg_list) < self.k_total:
-            fill = self._sample_unique_or_choices(cross_pool, self.k_total - len(neg_list), ban_set=set(neg_list) | ban)
-            neg_list.extend(fill)
-
-        pep_ids = self._encode_seq(pep, self.pep_max_len, mask_prob=self.pep_mask)
-        pos_ids = self._encode_seq(cdr3_pos_seq, self.cdr3_max_len, mask_prob=self.cdr3_mask)
-        neg_ids = [self._encode_seq(s, self.cdr3_max_len, mask_prob=self.cdr3_mask) for s in neg_list]
-        neg_ids = torch.stack(neg_ids, dim=0)  # [K_total, Lc]
-
-        out = {
-            'peptide': pep_ids,           # [Lp]
-            'cdr3_pos': pos_ids,          # [Lc]
-            'cdr3_negs': neg_ids,         # [K_total, Lc]， K_total = k_cross + k_hard
-        }
-        return out, idx
 
 class MPTDataSet(Dataset):
   def __init__(self, mpt_df, mhc_type, 
@@ -357,7 +263,6 @@ class MPTDataSet(Dataset):
         out['y_mpt'] = torch.tensor(float(row['binding']), dtype=torch.float32)
 
     return out, idx  
-
 
 class MPTFineTuneDataSet(Dataset):
   def __init__(self, mpt_df, mhc_type, 
