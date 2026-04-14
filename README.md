@@ -86,7 +86,7 @@ conda activate pepbridge
 ```bash
 pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2
 pip install numpy==1.26.4 pandas==2.2.2 scikit-learn==1.4.2 scipy==1.13.1
-pip install tqdm==4.66.4 biopython==1.83 peft==0.11.1
+pip install matplotlib==3.8 einops==0.8
 ```
 
 If your local setup requires additional packages, such as ESM or other model-specific dependencies, please install them separately.
@@ -215,7 +215,7 @@ python infer.py task=mp,pt,mpt,mp_contact,pt_contact,imm input_csv=example.csv o
 Batch size for binding-related tasks:
 
 ```bash
-python infer.py task=mp,pt,mpt,imm input_csv=example.csv batch_size=128
+python infer.py task=mp,pt,mpt,imm input_csv=example.csv batch_size=32
 ```
 
 ### `contact_batch_size`
@@ -232,6 +232,14 @@ Whether to save predicted distance matrices for contact tasks:
 
 ```bash
 python infer.py task=mp_contact input_csv=example.csv save_dist=true
+```
+
+### `use_lora`
+
+Whether to load LoRA adapters:
+
+```bash
+python infer.py task=mp input_csv=example.csv use_lora=true
 ```
 
 ### `path` or `paths`
@@ -347,10 +355,9 @@ python infer.py \
     task=mp,pt,mpt,imm,mp_contact,pt_contact \
     input_csv=example.csv \
     out_dir=./results \
-    batch_size=128 \
+    batch_size=32 \
     contact_batch_size=8 \
-    save_dist=true \
-    use_lora=true
+    save_dist=true 
 ```
 
 ---

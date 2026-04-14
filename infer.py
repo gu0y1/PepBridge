@@ -519,10 +519,10 @@ if __name__ == "__main__":
         raise FileNotFoundError(f"No checkpoints found from: {raw_paths}")
 
     use_lora = str2bool(cli_args.get("use_lora", "true"))
-    save_dist = str2bool(cli_args.get("save_dist", "false"))
+    save_dist = str2bool(cli_args.get("save_dist", "true"))
     keep_index_prefix = str2bool(cli_args.get("keep_index_prefix", "true"))
 
-    batch_size = int(cli_args.get("batch_size", "128"))
+    batch_size = int(cli_args.get("batch_size", "16"))
     contact_batch_size = int(cli_args.get("contact_batch_size", cli_args.get("batch_size", "8")))
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
