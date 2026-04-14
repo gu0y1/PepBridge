@@ -364,7 +364,7 @@ python infer.py \
 
 ## Citation
 
-If you use PepBridge in your work, please cite the associated manuscript once available.
+XXXXXX
 
 ---
 
