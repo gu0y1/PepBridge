@@ -18,7 +18,9 @@ This repository provides the model code, inference pipeline, and training utilit
 
 ## Model framework
 
-![PepBridge framework](doc/figure1.png)
+<p align="center">
+  <img src="doc/figure1.png" alt="PepBridge framework" width="600">
+</p>
 
 ---
 
@@ -230,14 +232,6 @@ Whether to save predicted distance matrices for contact tasks:
 
 ```bash
 python infer.py task=mp_contact input_csv=example.csv save_dist=true
-```
-
-### `use_lora`
-
-Whether to load LoRA adapters:
-
-```bash
-python infer.py task=mp input_csv=example.csv use_lora=true
 ```
 
 ### `path` or `paths`
