@@ -64,7 +64,7 @@ PepBridge/
 
 > **Reminder:** please replace the Zenodo link below with the final public URL.
 >
-> Zenodo: `XXXX`
+> Zenodo: https://doi.org/10.5281/zenodo.19632906
 
 ---
 

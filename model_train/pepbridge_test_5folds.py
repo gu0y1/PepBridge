@@ -267,7 +267,7 @@ if __name__ == "__main__":
     imm_df = pd.read_csv(os.path.join(DATA,'immunogenicity_test.csv'), header=0, index_col=0).reset_index(drop=True)
     mp_contact_df = pd.read_csv(os.path.join(DATA,'mp_pdb_test1.csv'),  header=0, index_col=0).reset_index(drop=True)
     pt_contact_df = pd.read_csv(os.path.join(DATA,'pt_pdb_test.csv'), header=0, index_col=0).reset_index(drop=True)
-    post_2022 = pd.read_csv(os.path.join(DATA,'post_2022_dataset.csv'),  header=0, index_col=0).reset_index(drop=True)
+    post_2022 = pd.read_csv(os.path.join(DATA,'post_2022_dataset.csv'),  header=0).reset_index(drop=True)
 ####
     pt_contact_loader_2022_2026 = DataLoader(
         PTDataSet(post_2022, 
