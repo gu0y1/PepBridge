@@ -363,7 +363,7 @@ python infer.py \
 
 ## Citation
 
-PepBridge for peptide-bridged, unified and structure-aware modeling of pMHC-TCR recognition
+PepBridge for peptide-bridged, unified and structure-aware modeling of pMHC-TCR recognition 
 Wenpu Lai, Yang Li, Oscar Junhong Luo
 
 ---
