@@ -62,7 +62,6 @@ PepBridge/
     └── esm_emb_HLAI.pkl
 ```
 
-> **Reminder:** please replace the Zenodo link below with the final public URL.
 >
 > Zenodo: https://doi.org/10.5281/zenodo.19632906
 
