@@ -135,28 +135,28 @@ def normalize_input_df(df: pd.DataFrame, pseudo_map: dict = None) -> pd.DataFram
     df = df.rename(columns=rename_map)
 
     if "MHC" in df.columns:
-        df["MHC"] = df["MHC"].astype(str).str.strip().str.upper()
+        df["MHC"] = df["MHC"].fillna("").astype(str).str.strip().str.upper()
 
     if "peptide" in df.columns:
-        df["peptide"] = df["peptide"].astype(str).str.strip().str.upper()
+        df["peptide"] = df["peptide"].fillna("").astype(str).str.strip().str.upper()
 
     if "cdr3" in df.columns:
-        df["cdr3"] = df["cdr3"].astype(str).str.strip().str.upper()
+        df["cdr3"] = df["cdr3"].fillna("").astype(str).str.strip().str.upper()
 
     if "v_gene" in df.columns:
-        df["v_gene"] = df["v_gene"].astype(str).str.strip()
+        df["v_gene"] = df["v_gene"].fillna("").astype(str).str.strip()
 
     if "pseudo_MHC" in df.columns:
-        df["pseudo_MHC"] = df["pseudo_MHC"].astype(str).str.strip().str.upper()
+        df["pseudo_MHC"] = df["pseudo_MHC"].fillna("").astype(str).str.strip().str.upper()
 
     if "MHC" in df.columns and "pseudo_MHC" not in df.columns and pseudo_map is not None:
-        df["pseudo_MHC"] = df["MHC"].map(pseudo_map)
+        df["pseudo_MHC"] = df["MHC"].map(pseudo_map).fillna("")
         df["pseudo_MHC"] = df["pseudo_MHC"].astype(str).str.strip().str.upper()
 
     return df.reset_index(drop=True)
 
 
-def validate_df_for_task(df: pd.DataFrame, task: str):
+def validate_df_for_task(df: pd.DataFrame, task: str, logger):
     required = {
         "mp": ["MHC", "peptide", "pseudo_MHC"],
         "imm": ["MHC", "peptide", "pseudo_MHC"],
@@ -168,16 +168,19 @@ def validate_df_for_task(df: pd.DataFrame, task: str):
 
     miss = [x for x in required[task] if x not in df.columns]
     if miss:
-        raise ValueError(f"Input csv missing required columns for task={task}: {miss}")
+        logger.error(f"Input csv missing required columns for task={task}: {miss}")
+        return pd.Series(False, index=df.index)
 
-    if "pseudo_MHC" in required[task]:
-        bad = df["pseudo_MHC"].isna() | (df["pseudo_MHC"] == "") | (df["pseudo_MHC"] == "NAN")
-        if bad.any():
-            bad_mhc = df.loc[bad, "MHC"].drop_duplicates().tolist()
-            raise ValueError(
-                f"Failed to map pseudo_MHC for task={task}. Missing MHC alleles: "
-                + ", ".join(map(str, bad_mhc[:20]))
-            )
+    valid_mask = pd.Series(True, index=df.index)
+    for col in required[task]:
+        bad_col = df[col].isna() | (df[col] == "") | (df[col] == "NAN")
+        valid_mask &= ~bad_col
+
+    if not valid_mask.all():
+        bad_count = (~valid_mask).sum()
+        logger.warning(f"Task {task}: Dropping {bad_count} invalid/empty rows to prevent crash.")
+        
+    return valid_mask
 
 
 # -----------------------------
@@ -245,7 +248,7 @@ def load_models(ckpt_paths, use_lora, device, logger):
             )
 
         base_model.to(device)
-        ckpt = torch.load(p, map_location=device)
+        ckpt = torch.load(p, map_location=device, weights_only=True)
         base_model.load_state_dict(ckpt["model_state"], strict=True)
         base_model.eval()
         models.append(base_model)
@@ -424,7 +427,7 @@ def save_binding_result(df_out, out_dir, input_csv, logger):
     logger.info(f"Saved merged binding prediction csv to: {out_csv}")
 
 
-def save_contact_result(df, out_dict, out_dir, task, logger, save_dist=True, keep_index_prefix=True):
+def save_contact_result(df, out_dict, out_dir, task, logger, save_dist=True, keep_index_prefix=True, original_indices=None):
     task_dir = os.path.join(out_dir, task)
     os.makedirs(task_dir, exist_ok=True)
 
@@ -433,6 +436,8 @@ def save_contact_result(df, out_dict, out_dir, task, logger, save_dist=True, kee
     mask = out_dict["mask"]
 
     for i in range(len(df)):
+        orig_i = i if original_indices is None else original_indices[i]
+        
         if task == "mp_contact":
             pseudo_seq = str(df.loc[i, "pseudo_MHC"]).strip().upper()
             pep_seq = str(df.loc[i, "peptide"]).strip().upper()
@@ -441,15 +446,15 @@ def save_contact_result(df, out_dict, out_dir, task, logger, save_dist=True, kee
             pep_name = safe_name(pep_seq)
 
             if keep_index_prefix:
-                prefix = f"{i:06d}_{pseudo_name}_{pep_name}"
+                prefix = f"{orig_i:06d}_{pseudo_name}_{pep_name}"
             else:
                 prefix = f"{pseudo_name}_{pep_name}"
 
-            h = len(pseudo_seq)
-            w = len(pep_seq)
+            h = min(34, len(pseudo_seq))
+            w = min(15, len(pep_seq))
 
-            row_labels = list(pseudo_seq)
-            col_labels = list(pep_seq)
+            row_labels = list(pseudo_seq)[:h]
+            col_labels = list(pep_seq)[:w]
 
         else:
             pep_seq = str(df.loc[i, "peptide"]).strip().upper()
@@ -459,15 +464,15 @@ def save_contact_result(df, out_dict, out_dir, task, logger, save_dist=True, kee
             cdr3_name = safe_name(cdr3_seq)
 
             if keep_index_prefix:
-                prefix = f"{i:06d}_{pep_name}_{cdr3_name}"
+                prefix = f"{orig_i:06d}_{pep_name}_{cdr3_name}"
             else:
                 prefix = f"{pep_name}_{cdr3_name}"
 
-            h = len(pep_seq)
-            w = len(cdr3_seq)
+            h = min(15, len(pep_seq))
+            w = min(20, len(cdr3_seq))
 
-            row_labels = list(pep_seq)
-            col_labels = list(cdr3_seq)
+            row_labels = list(pep_seq)[:h]
+            col_labels = list(cdr3_seq)[:w]
 
         prob_mat = pred_prob[i][:h, :w].copy()
         prob_mask = mask[i][:h, :w]
@@ -546,26 +551,35 @@ if __name__ == "__main__":
 
     for task in tasks:
         logger.info(f"===== Running task: {task} =====")
-        validate_df_for_task(df_norm, task)
+        valid_mask = validate_df_for_task(df_norm, task, logger=logger)
+        
+        if not valid_mask.any():
+            logger.warning(f"No valid rows for task {task}. Skipping.")
+            continue
+            
+        df_task = df_norm[valid_mask].reset_index(drop=False)
 
         bs = contact_batch_size if task in ("mp_contact", "pt_contact") else batch_size
-        dataloader = build_infer_loader(df_norm, task=task, batch_size=bs)
+        dataloader = build_infer_loader(df_task, task=task, batch_size=bs)
 
         if task in ("mp", "pt", "imm", "mpt"):
             pred = infer_binding(models, dataloader, task=task, device=device)
-            df_binding_out = merge_binding_predictions(df_binding_out, pred, task)
+            arr_prob_full = np.full((len(df_norm),), np.nan, dtype=np.float32)
+            arr_prob_full[df_task["index"].to_numpy()] = pred
+            df_binding_out = merge_binding_predictions(df_binding_out, arr_prob_full, task)
             has_binding_task = True
 
         elif task in ("mp_contact", "pt_contact"):
             out_dict = infer_contact(models, dataloader, task=task, device=device)
             save_contact_result(
-                df_norm,
+                df_task,
                 out_dict,
                 out_dir=out_dir,
                 task=task,
                 logger=logger,
                 save_dist=save_dist,
                 keep_index_prefix=keep_index_prefix,
+                original_indices=df_task["index"].to_numpy()
             )
 
         else:
