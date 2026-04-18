@@ -62,7 +62,7 @@ if __name__ == "__main__":
     aa_dict = mk_aa_dict()
     bv_dcit = mk_bv_dict()
 
-    device = 'cuda'
+    device = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
 
     pt_df = pd.read_csv(os.path.join(DATA,'pt_train2.csv'), header=0, index_col=0)
     mp_df = pd.read_csv(os.path.join(DATA,'mp_train2.csv'), header=0, index_col=0)
@@ -152,7 +152,7 @@ if __name__ == "__main__":
             peptides_per_step=64, 
             samples_per_peptide=2, 
             seed=42,
-            num_workers=0, pin_memory=False,
+            num_workers=4, pin_memory=(device == 'cuda'),
             ensure_full_batch=False
         )
 
@@ -172,7 +172,7 @@ if __name__ == "__main__":
             peptides_per_step=64, 
             samples_per_peptide=2, 
             seed=seed,
-            num_workers=0, pin_memory=False,
+            num_workers=4, pin_memory=(device == 'cuda'),
             ensure_full_batch=False
         )
 
@@ -221,7 +221,7 @@ if __name__ == "__main__":
         train_three_phases_multi_loaders(  
             model=model,
             loaders=train_loaders,
-            device="cuda",
+            device=device,
             save_dir=save_dir,
             epochs_A=12, epochs_B=9, epochs_C=6,
             steps_per_epoch=1000,

@@ -427,9 +427,14 @@ def save_binding_result(df_out, out_dir, input_csv, logger):
     logger.info(f"Saved merged binding prediction csv to: {out_csv}")
 
 
-def save_contact_result(df, out_dict, out_dir, task, logger, save_dist=True, keep_index_prefix=True, original_indices=None):
+def save_contact_result(df, out_dict, out_dir, task, logger, save_dist=True, keep_index_prefix=True, original_indices=None, contact_format="csv"):
     task_dir = os.path.join(out_dir, task)
-    os.makedirs(task_dir, exist_ok=True)
+    
+    if contact_format == "csv":
+        os.makedirs(task_dir, exist_ok=True)
+    else:
+        npz_dict_site = {}
+        npz_dict_dist = {}
 
     pred_prob = out_dict["pred_prob"]
     pred_dist = out_dict["pred_dist"]
@@ -478,17 +483,29 @@ def save_contact_result(df, out_dict, out_dir, task, logger, save_dist=True, kee
         prob_mask = mask[i][:h, :w]
         prob_mat[prob_mask < 0.5] = np.nan
 
-        prob_csv = os.path.join(task_dir, prefix + "_site.csv")
-        pd.DataFrame(prob_mat, index=row_labels, columns=col_labels).to_csv(prob_csv)
+        if contact_format == "npz":
+            npz_dict_site[prefix] = prob_mat
+            if save_dist and pred_dist is not None:
+                dist_mat = pred_dist[i][:h, :w].copy()
+                dist_mat[prob_mask < 0.5] = np.nan
+                npz_dict_dist[prefix] = dist_mat
+        else:
+            prob_csv = os.path.join(task_dir, prefix + "_site.csv")
+            pd.DataFrame(prob_mat, index=row_labels, columns=col_labels).to_csv(prob_csv)
+    
+            if save_dist and pred_dist is not None:
+                dist_mat = pred_dist[i][:h, :w].copy()
+                dist_mat[prob_mask < 0.5] = np.nan
+                dist_csv = os.path.join(task_dir, prefix + "_dist.csv")
+                pd.DataFrame(dist_mat, index=row_labels, columns=col_labels).to_csv(dist_csv)
 
-        if save_dist and pred_dist is not None:
-            dist_mat = pred_dist[i][:h, :w].copy()
-            dist_mat[prob_mask < 0.5] = np.nan
-
-            dist_csv = os.path.join(task_dir, prefix + "_dist.csv")
-            pd.DataFrame(dist_mat, index=row_labels, columns=col_labels).to_csv(dist_csv)
-
-    logger.info(f"[{task}] Saved contact matrices to directory: {task_dir}")
+    if contact_format == "npz":
+        np.savez_compressed(os.path.join(out_dir, f"{task}_site.npz"), **npz_dict_site)
+        if npz_dict_dist:
+            np.savez_compressed(os.path.join(out_dir, f"{task}_dist.npz"), **npz_dict_dist)
+        logger.info(f"[{task}] Saved aggregated contact matrices to npz archives in: {out_dir}")
+    else:
+        logger.info(f"[{task}] Saved contact matrices to directory: {task_dir}")
 
 
 # -----------------------------
@@ -526,11 +543,12 @@ if __name__ == "__main__":
     use_lora = str2bool(cli_args.get("use_lora", "true"))
     save_dist = str2bool(cli_args.get("save_dist", "true"))
     keep_index_prefix = str2bool(cli_args.get("keep_index_prefix", "true"))
+    contact_format = cli_args.get("contact_format", "csv").lower()
 
     batch_size = int(cli_args.get("batch_size", "16"))
     contact_batch_size = int(cli_args.get("contact_batch_size", cli_args.get("batch_size", "8")))
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     logger.info(f"Using device: {device}")
     logger.info(f"Tasks: {tasks}")
     logger.info(f"Output directory: {out_dir}")
@@ -579,7 +597,8 @@ if __name__ == "__main__":
                 logger=logger,
                 save_dist=save_dist,
                 keep_index_prefix=keep_index_prefix,
-                original_indices=df_task["index"].to_numpy()
+                original_indices=df_task["index"].to_numpy(),
+                contact_format=contact_format
             )
 
         else:
