@@ -718,19 +718,28 @@ def train_fintune(
             if traj is not None:
                 traj = traj.to(device)
 
-            with autocast(enabled=amp, device_type='cuda'):
+            with autocast(enabled=amp):
                 logits = model.mpt_pred_finetune(
                     mhc, peptide, cdr3, esm_mhc, trbv, 
                     trav, traj
                 )
+                logits = logits.squeeze(-1) if logits.ndim > 1 else logits
+                score = score.squeeze(-1) if score.ndim > 1 else score
 
                 idx = torch.randperm(logits.size(0), device=logits.device)
                 logits1, logits2 = logits, logits[idx]
                 s1, s2 = score, score[idx]
-                y_pair = (s1 > s2).float() * 2.0 - 1.0  # +1 / -1
-                Lmargin = F.softplus(-(logits2 - logits1) * y_pair).mean()
 
-            scaler.scale(Lmargin / grad_accum_steps).backward()
+                mask = (s1 != s2)
+                if mask.sum() == 0:
+                    continue
+
+                y = torch.sign(s1 - s2)[mask]               # (+1/-1)
+                diff = (logits2 - logits1)[mask]            # (P,)
+
+                Lranking = F.softplus(diff * y).mean()
+
+            scaler.scale(Lranking / grad_accum_steps).backward()
 
             if (step + 1) % grad_accum_steps == 0:
                 scaler.step(opt)
@@ -740,7 +749,7 @@ def train_fintune(
             if (global_step % log_interval) == 0:
                 msg = (
                     f"[Epoch {epoch} Step {step+1}/{steps_per_epoch}] "
-                    f"Lmargin={Lmargin.item():.4f}"
+                    f"Lranking={Lranking.item():.4f}"
                 )
                 if logger is not None:
                     logger.info(msg)
