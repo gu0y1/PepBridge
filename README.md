@@ -24,7 +24,7 @@ This repository provides the model code, inference pipeline, and training utilit
 
 ---
 
-## 🚀 Quick Start (End-to-End Test)
+## Quick Start (End-to-End Test)
 
 If you want to quickly test the model on a fresh system, follow these 4 steps:
 
